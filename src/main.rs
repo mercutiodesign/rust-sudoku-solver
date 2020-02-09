@@ -7,6 +7,7 @@ struct Board {
 
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter<>) -> fmt::Result {
+        let divider = true;
         for (i, row) in self.cells.iter().enumerate() {
             for (j, cell) in row.iter().enumerate() {
                 if *cell == 0 {
@@ -17,13 +18,13 @@ impl fmt::Display for Board {
 
                 if j + 1 == row.len() {
                     writeln!(f, "")?
-                } else if j % 3 == 2 {
+                } else if divider && j % 3 == 2 {
                     write!(f, " | ")?
                 } else {
                     write!(f, " ")?
                 }
             }
-            if i < self.cells.len() - 1 && i % 3 == 2 {
+            if divider && i < self.cells.len() - 1 && i % 3 == 2 {
                 writeln!(f, "------|-------|------")?
             }
         }
