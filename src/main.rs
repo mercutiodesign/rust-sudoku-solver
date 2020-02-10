@@ -1,9 +1,15 @@
 use std::fmt;
+use log::{debug, info, trace};
 
 #[derive(Debug, Clone, Copy)]
 struct Board {
     cells: [[u8; 9]; 9],
     possibilities: [[[bool; 9]; 9]; 9],
+}
+
+struct Trace {
+    pre_board: Board,
+    possibility: PossiblePath,
 }
 
 impl fmt::Display for Board {
@@ -34,7 +40,7 @@ impl fmt::Display for Board {
 }
 
 fn clear_value(possibilities: &mut [[[bool; 9]; 9]; 9], i: usize, j: usize, cell: &u8) {
-    println!("{} {}: clearing {}", i, j, cell);
+    trace!("{} {}: clearing {}", i, j, cell);
 
     // set all other possible values at this position to false
     for arr in possibilities.iter_mut() {
@@ -59,8 +65,22 @@ fn clear_value(possibilities: &mut [[[bool; 9]; 9]; 9], i: usize, j: usize, cell
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PossiblePath {
+    i: usize,
+    j: usize,
+    v: u8,
+}
+
+enum SearchResult {
+    Invalid,
+    Changed,
+    Finished,
+    Possibility(Trace),
+}
+
 impl Board {
-    fn find_possibilities(&mut self) {
+    fn find_possibilities(&mut self) -> bool {
         for (i, row) in self.cells.iter().enumerate() {
             for (j, cell) in row.iter().enumerate() {
                 if *cell != 0 {
@@ -69,40 +89,77 @@ impl Board {
             }
         }
 
-        let mut cleared = true;
-        while cleared {
-            cleared = false;
-            for (i, row) in self.cells.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    if *cell == 0 {
-                        // check possible numbers
-                        let x: Vec<bool> = self.possibilities.iter().map(|a| a[i][j]).collect();
-                        let s = x.iter().filter(|&&x| x).count();
-                        if s == 0 {
-                            panic!("no more choices for {} {}", i, j)
+        let mut choices: Vec<Trace> = vec![];
+        loop {
+            match self.enter_fields() {
+                SearchResult::Invalid => {
+                    match choices.pop() {
+                        Some(choice) => {
+                            self.cells = choice.pre_board.cells;
+                            self.possibilities = choice.pre_board.possibilities;
+                            self.possibilities[(choice.possibility.v - 1) as usize][choice.possibility.i][choice.possibility.j] = false;
+                            debug!("Backtracked   {:?}", choice.possibility);
                         }
-                        if s <= 1 {
-                            let pos = x.iter().position(|&v| v).unwrap() + 1;
-                            println!("{} {} only has one possibility: {}", i, j, pos);
-                            *cell = pos as u8;
-                            clear_value(&mut self.possibilities, i, j, cell);
-                            cleared = true;
-                        } else {
-                            for (n, v) in x.iter().enumerate() {
-                                // check if we're unique in this row / column / block
-                                if *v {
-                                    let arr = self.possibilities[n];
-                                    // todo: maybe check for single value in cell block
-                                    if arr[i].iter().filter(|&&x| x).count() == 1
-                                        || arr.iter().filter(|row| row[j]).count() == 1
-                                    {
-                                        let pos = n + 1;
-                                        println!("{} {} alone in row / col: {}", i, j, pos);
-                                        *cell = pos as u8;
-                                        clear_value(&mut self.possibilities, i, j, cell);
-                                        cleared = true;
-                                        break;
-                                    }
+                        None => {
+                            info!("Could not solve board");
+                            return false;
+                        }
+                    }
+                }
+                SearchResult::Changed => {
+                    trace!("Changed, running again");
+                }
+                SearchResult::Finished => {
+                    info!("Finished!");
+                    return true;
+                }
+                SearchResult::Possibility(trace) => {
+                    debug!("Branched into {:?}", trace.possibility);
+                    choices.push(trace);
+                }
+            }
+        }
+    }
+
+    fn enter_fields(&mut self) -> SearchResult {
+        let mut cleared = false;
+        let mut possible_path = PossiblePath { i: 0, j: 0, v: 0 };
+        for (i, row) in self.cells.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                if *cell == 0 {
+                    // check possible numbers
+                    let x: Vec<bool> = self.possibilities.iter().map(|a| a[i][j]).collect();
+                    let s = x.iter().filter(|&&x| x).count();
+                    if s == 0 {
+                        trace!("Invalid: no more choices for {} {}", i, j);
+                        return SearchResult::Invalid;
+                        // return false;
+                    }
+                    if s <= 1 {
+                        let pos = x.iter().position(|&v| v).unwrap() + 1;
+                        trace!("{} {} only has one possibility: {}", i, j, pos);
+                        *cell = pos as u8;
+                        clear_value(&mut self.possibilities, i, j, cell);
+                        cleared = true;
+                    } else {
+                        possible_path.i = i;
+                        possible_path.j = j;
+                        for (n, v) in x.iter().enumerate() {
+                            // check if we're unique in this row / column / block
+                            if *v {
+                                let arr = self.possibilities[n];
+                                // todo: maybe check for single value in cell block
+                                let row_count = arr[i].iter().filter(|&&x| x).count();
+                                let col_count = arr.iter().filter(|row| row[j]).count();
+                                if row_count == 1 || col_count == 1 {
+                                    let pos = n + 1;
+                                    trace!("{} {} alone in row / col: {}", i, j, pos);
+                                    *cell = pos as u8;
+                                    clear_value(&mut self.possibilities, i, j, cell);
+                                    cleared = true;
+                                    break;
+                                } else {
+                                    possible_path.v = (n + 1) as u8;
                                 }
                             }
                         }
@@ -110,10 +167,27 @@ impl Board {
                 }
             }
         }
+
+        if cleared {
+            return SearchResult::Changed;
+        } else if possible_path.v == 0 {
+            return SearchResult::Finished;
+        } else {
+            let trace = Trace {
+                pre_board: *self,
+                possibility: possible_path,
+            };
+
+            let cell = &mut self.cells[possible_path.i][possible_path.j];
+            *cell = possible_path.v;
+            clear_value(&mut self.possibilities, possible_path.i, possible_path.j, cell);
+            return SearchResult::Possibility(trace);
+        }
     }
 }
 
 fn main() {
+    pretty_env_logger::init();
     let mut board = Board {
         cells: [
             [3, 0, 9, 7, 0, 0, 0, 4, 0],
@@ -132,5 +206,16 @@ fn main() {
 
     board.find_possibilities();
 
-    println!("{}", board);
+    println!("\n{}", board);
+
+    board = Board {
+        cells: [[0; 9]; 9],
+        possibilities: [[[true; 9]; 9]; 9],
+    };
+
+    println!("\n{}", board);
+
+    board.find_possibilities();
+
+    println!("\n{}", board);
 }
