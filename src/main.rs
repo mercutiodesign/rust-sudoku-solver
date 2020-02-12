@@ -1,5 +1,6 @@
+use log::{debug, info, trace, error};
 use std::fmt;
-use log::{debug, info, trace};
+use std::io::{self, BufRead};
 
 #[derive(Debug, Clone, Copy)]
 struct Board {
@@ -33,6 +34,27 @@ impl fmt::Display for Board {
             }
             if divider && i < self.cells.len() - 1 && i % 3 == 2 {
                 writeln!(f, "------|-------|------")?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Binary for Board {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut first = true;
+        for row in &self.cells {
+            if first {
+                first = false;
+            } else {
+                writeln!(f)?
+            }
+            for cell in row {
+                if *cell == 0 {
+                    write!(f, ".")?
+                } else {
+                    write!(f, "{}", cell)?
+                }
             }
         }
         Ok(())
@@ -79,6 +101,43 @@ enum SearchResult {
     Possibility(Trace),
 }
 
+fn read_board() -> io::Result<Board> {
+    let mut board = Board {
+        cells: [[0; 9]; 9],
+        possibilities: [[[true; 9]; 9]; 9],
+    };
+
+    let mut i = 0;
+    let stdin = io::stdin();
+    for maybe_line in stdin.lock().lines() {
+        let mut j = 0;
+        let line = maybe_line?;
+        for ch in line.chars() {
+            if ch == '!' || ch == '-' {
+                continue;
+            }
+            match ch.to_digit(10) {
+                Some(d) => {
+                    if i >= board.cells.len() {
+                        error!("line is out of bounds (i: {}) {}", i, line);
+                    }
+                    if j >= board.cells[i].len() {
+                        error!("column is out of bounds (i: {}, j: {}, ch: {}) {}", i, j, ch, line);
+                    }
+                    board.cells[i][j] = d as u8;
+                }
+                None => {}
+            }
+            j += 1;
+        }
+        if j > 0 {
+            i += 1;
+        }
+    }
+
+    return Ok(board);
+}
+
 impl Board {
     fn find_possibilities(&mut self) -> bool {
         for (i, row) in self.cells.iter().enumerate() {
@@ -92,20 +151,19 @@ impl Board {
         let mut choices: Vec<Trace> = vec![];
         loop {
             match self.enter_fields() {
-                SearchResult::Invalid => {
-                    match choices.pop() {
-                        Some(choice) => {
-                            self.cells = choice.pre_board.cells;
-                            self.possibilities = choice.pre_board.possibilities;
-                            self.possibilities[(choice.possibility.v - 1) as usize][choice.possibility.i][choice.possibility.j] = false;
-                            debug!("Backtracked   {:?}", choice.possibility);
-                        }
-                        None => {
-                            info!("Could not solve board");
-                            return false;
-                        }
+                SearchResult::Invalid => match choices.pop() {
+                    Some(choice) => {
+                        self.cells = choice.pre_board.cells;
+                        self.possibilities = choice.pre_board.possibilities;
+                        self.possibilities[(choice.possibility.v - 1) as usize]
+                            [choice.possibility.i][choice.possibility.j] = false;
+                        debug!("Backtracked   {:?} [c={}]", choice.possibility, choices.len());
                     }
-                }
+                    None => {
+                        info!("Could not solve board");
+                        return false;
+                    }
+                },
                 SearchResult::Changed => {
                     trace!("Changed, running again");
                 }
@@ -114,7 +172,7 @@ impl Board {
                     return true;
                 }
                 SearchResult::Possibility(trace) => {
-                    debug!("Branched into {:?}", trace.possibility);
+                    debug!("Branched into {:?} [c={}]", trace.possibility, choices.len());
                     choices.push(trace);
                 }
             }
@@ -133,7 +191,6 @@ impl Board {
                     if s == 0 {
                         trace!("Invalid: no more choices for {} {}", i, j);
                         return SearchResult::Invalid;
-                        // return false;
                     }
                     if s <= 1 {
                         let pos = x.iter().position(|&v| v).unwrap() + 1;
@@ -148,7 +205,6 @@ impl Board {
                             // check if we're unique in this row / column / block
                             if *v {
                                 let arr = self.possibilities[n];
-                                // todo: maybe check for single value in cell block
                                 let row_count = arr[i].iter().filter(|&&x| x).count();
                                 let col_count = arr.iter().filter(|row| row[j]).count();
                                 if row_count == 1 || col_count == 1 {
@@ -180,7 +236,12 @@ impl Board {
 
             let cell = &mut self.cells[possible_path.i][possible_path.j];
             *cell = possible_path.v;
-            clear_value(&mut self.possibilities, possible_path.i, possible_path.j, cell);
+            clear_value(
+                &mut self.possibilities,
+                possible_path.i,
+                possible_path.j,
+                cell,
+            );
             return SearchResult::Possibility(trace);
         }
     }
@@ -188,34 +249,10 @@ impl Board {
 
 fn main() {
     pretty_env_logger::init();
-    let mut board = Board {
-        cells: [
-            [3, 0, 9, 7, 0, 0, 0, 4, 0],
-            [0, 0, 5, 0, 0, 2, 0, 0, 0],
-            [0, 4, 0, 0, 0, 0, 0, 0, 0],
-            [5, 0, 0, 3, 0, 0, 0, 7, 0],
-            [6, 0, 4, 0, 2, 5, 0, 0, 0],
-            [0, 0, 1, 0, 0, 0, 0, 0, 0],
-            [0, 1, 7, 5, 0, 0, 2, 0, 0],
-            [9, 0, 0, 0, 0, 0, 0, 0, 0],
-            [4, 0, 0, 0, 0, 0, 6, 3, 7],
-        ],
-        possibilities: [[[true; 9]; 9]; 9],
-    };
-    println!("{}", board);
+    let mut board = read_board().unwrap();
+    debug!("solving:\n{:b}", board);
 
     board.find_possibilities();
 
-    println!("\n{}", board);
-
-    board = Board {
-        cells: [[0; 9]; 9],
-        possibilities: [[[true; 9]; 9]; 9],
-    };
-
-    println!("\n{}", board);
-
-    board.find_possibilities();
-
-    println!("\n{}", board);
+    println!("{:b}", board);
 }
