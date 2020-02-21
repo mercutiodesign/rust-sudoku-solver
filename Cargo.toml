@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 log = ""
 pretty_env_logger = ""
+# hibitset = "0.6"

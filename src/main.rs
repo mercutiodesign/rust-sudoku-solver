@@ -1,16 +1,77 @@
-use log::{debug, info, trace, error};
+#[macro_use]
+extern crate log;
+use log::{debug, error, info, trace, Level};
 use std::fmt;
 use std::io::{self, BufRead};
+// use hibitset::BitSet;
 
-#[derive(Debug, Clone, Copy)]
+const N: usize = 9;
+const N_COLS: usize = N;
+const N_ROWS: usize = N;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Board {
-    cells: [[u8; 9]; 9],
-    possibilities: [[[bool; 9]; 9]; 9],
+    cells: [[u8; N_COLS]; N_ROWS],
 }
 
-struct Trace {
-    pre_board: Board,
-    possibility: PossiblePath,
+// columns
+const N_CONSTRAINTS: usize = 4 * N_COLS * N_ROWS;
+
+// rows
+const N_POSSIBILITIES: usize = 9 * N_COLS * N_ROWS;
+
+struct BinaryTable {
+    columns: [[bool; N_POSSIBILITIES]; N_CONSTRAINTS],
+}
+
+struct View {
+    columns: [bool; N_CONSTRAINTS],
+    rows: [bool; N_POSSIBILITIES],
+    selected: [bool; N_POSSIBILITIES],
+}
+
+struct Table {
+    table: BinaryTable,
+    view: View,
+}
+
+fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
+    let x = i / (N * N);
+    let y = (i / N) % N;
+    let z = i % N;
+
+    return (x, y, z as u8 + 1);
+}
+
+fn row_num_to_name(i: usize) -> String {
+    let (x, y, z) = row_num_to_coords(i);
+    return format!("R{}C{}#{}", x + 1, y + 1, z);
+}
+
+fn col_num_to_name(i: usize) -> String {
+    let j = i % (N * N);
+    let x = j / N;
+    let y = j % N + 1;
+    return match i / (N * N) {
+        0 => format!("R{}C{}", x + 1, y),
+        1 => format!("R{}#{}", x + 1, y),
+        2 => format!("C{}#{}", x + 1, y),
+        3 => format!("B{}{}#{}", x / 3 + 1, x % 3 + 1, y),
+        _ => panic!("{}?", i),
+    };
+}
+
+impl From<&View> for Board {
+    fn from(view: &View) -> Self {
+        let mut cells = [[0; N]; N];
+        for (i, v) in view.selected.iter().enumerate() {
+            if *v {
+                let (x, y, z) = row_num_to_coords(i);
+                cells[x][y] = z;
+            }
+        }
+        return Self { cells: cells };
+    }
 }
 
 impl fmt::Display for Board {
@@ -61,50 +122,9 @@ impl fmt::Binary for Board {
     }
 }
 
-fn clear_value(possibilities: &mut [[[bool; 9]; 9]; 9], i: usize, j: usize, cell: &u8) {
-    trace!("{} {}: clearing {}", i, j, cell);
-
-    // set all other possible values at this position to false
-    for arr in possibilities.iter_mut() {
-        arr[i][j] = false;
-    }
-
-    let val: usize = (*cell - 1).into();
-    for (k, row) in possibilities[val].iter_mut().enumerate() {
-        if k == i {
-            for c in row {
-                *c = false;
-            }
-        } else if k / 3 == i / 3 {
-            for (m, c) in row.iter_mut().enumerate() {
-                if m / 3 == j / 3 {
-                    *c = false;
-                }
-            }
-        } else {
-            row[j] = false;
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PossiblePath {
-    i: usize,
-    j: usize,
-    v: u8,
-}
-
-enum SearchResult {
-    Invalid,
-    Changed,
-    Finished,
-    Possibility(Trace),
-}
-
 fn read_board() -> io::Result<Board> {
     let mut board = Board {
-        cells: [[0; 9]; 9],
-        possibilities: [[[true; 9]; 9]; 9],
+        cells: [[0; N_COLS]; N_ROWS],
     };
 
     let mut i = 0;
@@ -118,11 +138,14 @@ fn read_board() -> io::Result<Board> {
             }
             match ch.to_digit(10) {
                 Some(d) => {
-                    if i >= board.cells.len() {
+                    if i >= N_ROWS {
                         error!("line is out of bounds (i: {}) {}", i, line);
                     }
-                    if j >= board.cells[i].len() {
-                        error!("column is out of bounds (i: {}, j: {}, ch: {}) {}", i, j, ch, line);
+                    if j >= N_COLS {
+                        error!(
+                            "column is out of bounds (i: {}, j: {}, ch: {}) {}",
+                            i, j, ch, line
+                        );
                     }
                     board.cells[i][j] = d as u8;
                 }
@@ -138,121 +161,195 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
-impl Board {
-    fn find_possibilities(&mut self) -> bool {
-        for (i, row) in self.cells.iter().enumerate() {
-            for (j, cell) in row.iter().enumerate() {
-                if *cell != 0 {
-                    clear_value(&mut self.possibilities, i, j, cell);
+impl View {
+    fn select_row(&mut self, table: &BinaryTable, row: usize) {
+        for (i, col) in table.columns.iter().enumerate() {
+            if col[row] && self.columns[i] {
+                self.columns[i] = false;
+                for (j, v) in col.iter().enumerate() {
+                    if *v {
+                        self.rows[j] = false;
+                    }
                 }
             }
         }
-
-        let mut choices: Vec<Trace> = vec![];
-        loop {
-            match self.enter_fields() {
-                SearchResult::Invalid => match choices.pop() {
-                    Some(choice) => {
-                        self.cells = choice.pre_board.cells;
-                        self.possibilities = choice.pre_board.possibilities;
-                        self.possibilities[(choice.possibility.v - 1) as usize]
-                            [choice.possibility.i][choice.possibility.j] = false;
-                        debug!("Backtracked   {:?} [c={}]", choice.possibility, choices.len());
-                    }
-                    None => {
-                        info!("Could not solve board");
-                        return false;
-                    }
-                },
-                SearchResult::Changed => {
-                    trace!("Changed, running again");
-                }
-                SearchResult::Finished => {
-                    info!("Finished!");
-                    return true;
-                }
-                SearchResult::Possibility(trace) => {
-                    debug!("Branched into {:?} [c={}]", trace.possibility, choices.len());
-                    choices.push(trace);
-                }
-            }
-        }
+        self.selected[row] = true;
     }
 
-    fn enter_fields(&mut self) -> SearchResult {
-        let mut cleared = false;
-        let mut possible_path = PossiblePath { i: 0, j: 0, v: 0 };
-        for (i, row) in self.cells.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                if *cell == 0 {
-                    // check possible numbers
-                    let x: Vec<bool> = self.possibilities.iter().map(|a| a[i][j]).collect();
-                    let s = x.iter().filter(|&&x| x).count();
-                    if s == 0 {
-                        trace!("Invalid: no more choices for {} {}", i, j);
-                        return SearchResult::Invalid;
-                    }
-                    if s <= 1 {
-                        let pos = x.iter().position(|&v| v).unwrap() + 1;
-                        trace!("{} {} only has one possibility: {}", i, j, pos);
-                        *cell = pos as u8;
-                        clear_value(&mut self.possibilities, i, j, cell);
-                        cleared = true;
-                    } else {
-                        possible_path.i = i;
-                        possible_path.j = j;
-                        for (n, v) in x.iter().enumerate() {
-                            // check if we're unique in this row / column / block
-                            if *v {
-                                let arr = self.possibilities[n];
-                                let row_count = arr[i].iter().filter(|&&x| x).count();
-                                let col_count = arr.iter().filter(|row| row[j]).count();
-                                if row_count == 1 || col_count == 1 {
-                                    let pos = n + 1;
-                                    trace!("{} {} alone in row / col: {}", i, j, pos);
-                                    *cell = pos as u8;
-                                    clear_value(&mut self.possibilities, i, j, cell);
-                                    cleared = true;
-                                    break;
-                                } else {
-                                    possible_path.v = (n + 1) as u8;
-                                }
-                            }
+    fn from(board: &Board, table: &BinaryTable) -> Self {
+        let mut view = Self {
+            columns: [true; N_CONSTRAINTS],
+            rows: [true; N_POSSIBILITIES],
+            selected: [false; N_POSSIBILITIES],
+        };
+
+        for (i, row) in board.cells.iter().enumerate() {
+            for (j, &cell) in row.iter().enumerate() {
+                if cell != 0 {
+                    view.select_row(table, (i * N + j) * N + cell as usize - 1);
+                }
+            }
+        }
+
+        return view;
+    }
+
+    fn col_count(&self, col: usize, table: &BinaryTable) -> u8 {
+        return table.columns[col]
+            .iter()
+            .zip(self.rows.iter())
+            .map(|(&a, &b)| (a && b) as u8)
+            .sum();
+    }
+
+    fn col_row<'a>(
+        &'a self,
+        col: usize,
+        table: &'a BinaryTable,
+    ) -> impl Iterator<Item = usize> + 'a {
+        return table.columns[col]
+            .iter()
+            .zip(self.rows.iter())
+            .enumerate()
+            .filter(|(_, (&a, &b))| a && b)
+            .map(|(i, _)| i);
+    }
+
+    fn active_columns<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
+        return self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v)
+            .map(|(i, _)| i);
+    }
+
+    fn log_col_counts(&self, table: &BinaryTable) {
+        if !(log_enabled!(Level::Debug)) {
+            return;
+        }
+        let mut counts: Vec<(usize, u8)> = self
+            .active_columns()
+            .map(|i| (i, self.col_count(i, table)))
+            .collect();
+        counts.sort_by_key(|(_, count)| *count);
+        for (i, count) in counts.iter() {
+            let row_names: Vec<String> = self
+                .col_row(*i, table)
+                .map(|r| row_num_to_name(r))
+                .collect();
+            debug!(
+                "{}: -> {} ({})",
+                col_num_to_name(*i),
+                row_names.join(", "),
+                count
+            );
+            assert_eq!(*count as usize, row_names.len());
+        }
+    }
+}
+
+fn col_sum(col: &[bool; N_POSSIBILITIES]) -> usize {
+    return col.iter().filter(|&&x| x).count();
+}
+
+impl From<&Board> for Table {
+    fn from(board: &Board) -> Self {
+        let mut table = BinaryTable {
+            columns: [[false; N_POSSIBILITIES]; N_CONSTRAINTS],
+        };
+
+        let mut cols = table.columns.iter_mut();
+
+        // row / col constraint
+        for i in 0..N {
+            for j in 0..N {
+                trace!("{:4}: R{}C{}", i * N + j, i + 1, j + 1);
+                let col = cols.next().unwrap();
+                for v in 0..N {
+                    let row = (i * N + j) * N + v;
+                    col[row] = true;
+                }
+            }
+        }
+
+        // row-number constraint
+        for i in 0..N {
+            for j in 0..N {
+                trace!("{:4}: R{}#{}", i * N + j + N * N, i + 1, j + 1);
+                let col = cols.next().unwrap();
+                for v in 0..N {
+                    let row = (i * N + v) * N + j;
+                    col[row] = true;
+                }
+            }
+        }
+
+        // col-number constraint
+        for i in 0..N {
+            for j in 0..N {
+                trace!("{:4}: C{}#{}", i * N + j + 2 * N * N, i + 1, j + 1);
+                let col = cols.next().unwrap();
+                for v in 0..N {
+                    let row = (v * N + i) * N + j;
+                    col[row] = true;
+                }
+            }
+        }
+
+        // box-number constraint
+        for b_i in 0..3 {
+            for b_j in 0..3 {
+                for j in 0..N {
+                    trace!(
+                        "{:4}: B{}{}#{}",
+                        (b_i * 3 + b_j) * N + j + 3 * N * N,
+                        b_i + 1,
+                        b_j + 1,
+                        j + 1
+                    );
+                    let col = cols.next().unwrap();
+                    for x in 0..3 {
+                        for y in 0..3 {
+                            let row = ((b_i * 3 + x) * N + b_j * 3 + y) * N + j;
+                            col[row] = true;
                         }
                     }
                 }
             }
         }
 
-        if cleared {
-            return SearchResult::Changed;
-        } else if possible_path.v == 0 {
-            return SearchResult::Finished;
-        } else {
-            let trace = Trace {
-                pre_board: *self,
-                possibility: possible_path,
-            };
+        assert!(cols.next().is_none(), "Haven't filled all columns");
 
-            let cell = &mut self.cells[possible_path.i][possible_path.j];
-            *cell = possible_path.v;
-            clear_value(
-                &mut self.possibilities,
-                possible_path.i,
-                possible_path.j,
-                cell,
-            );
-            return SearchResult::Possibility(trace);
+        for (i, col) in table.columns.iter().enumerate() {
+            assert_eq!(col_sum(col), N, "col {}", i);
         }
+
+        let view = View::from(board, &table);
+
+        return Self { table, view };
     }
 }
 
 fn main() {
     pretty_env_logger::init();
-    let mut board = read_board().unwrap();
+    let board = read_board().unwrap();
     debug!("solving:\n{:b}", board);
 
-    board.find_possibilities();
+    let table = Table::from(&board);
 
-    println!("{:b}", board);
+    let n_board = Board::from(&table.view);
+    assert_eq!(board, n_board);
+
+    if board.cells.len() < 9 {
+        debug!("");
+        trace!("");
+        info!("");
+    }
+
+    table.view.log_col_counts(&table.table);
+
+    // board.find_possibilities();
+
+    // println!("{:b}", board);
 }
