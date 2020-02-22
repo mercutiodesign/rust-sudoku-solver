@@ -15,18 +15,15 @@ struct Board {
 }
 
 // columns
+#[allow(dead_code)]
 const N_CONSTRAINTS: usize = 4 * N_COLS * N_ROWS;
 
 // rows
 const N_POSSIBILITIES: usize = 9 * N_COLS * N_ROWS;
 
-struct BinaryTable {
-    columns: [[bool; N_POSSIBILITIES]; N_CONSTRAINTS],
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct View {
-    columns: [bool; N_CONSTRAINTS],
+    columns: Vec<[bool; N_POSSIBILITIES]>, //[[bool; N_POSSIBILITIES]; N_CONSTRAINTS],
     rows: [bool; N_POSSIBILITIES],
     selected: [bool; N_POSSIBILITIES],
 }
@@ -43,7 +40,6 @@ enum SearchResult {
 }
 
 struct Table {
-    table: BinaryTable,
     view: View,
     traces: Vec<Trace>,
 }
@@ -61,6 +57,7 @@ fn row_num_to_name(i: usize) -> String {
     return format!("R{}C{}#{}", x + 1, y + 1, z);
 }
 
+#[allow(dead_code)]
 fn col_num_to_name(i: usize) -> String {
     let j = i % (N * N);
     let x = j / N;
@@ -174,65 +171,59 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
+fn select_row(
+    columns: &mut Vec<[bool; N_POSSIBILITIES]>,
+    rows: &mut [bool; N_POSSIBILITIES],
+    row: usize,
+) {
+    let mut i = 0;
+    columns.retain(|col| {
+        i += 1;
+        let remove = col[row];
+        if remove {
+            for (j, v) in col.iter().enumerate() {
+                if *v {
+                    rows[j] = false;
+                }
+            }
+        }
+
+        !remove
+    });
+}
+
 impl View {
-    fn select_row(&mut self, table: &BinaryTable, row: usize) {
+    fn select_row(&mut self, row: usize) {
         assert!(
             !self.selected[row],
             "already selected row: {}",
             row_num_to_name(row)
         );
         assert!(self.rows[row], "invalid puzzle: {}", row_num_to_name(row));
-        for (i, col) in table.columns.iter().enumerate() {
-            if col[row] {
-                assert!(
-                    self.columns[i],
-                    "invalid puzzle: {} violates {}",
-                    row_num_to_name(row),
-                    col_num_to_name(i)
-                );
-                self.columns[i] = false;
-                for (j, v) in col.iter().enumerate() {
-                    if *v {
-                        self.rows[j] = false;
-                    }
-                }
-            }
-        }
+        select_row(&mut self.columns, &mut self.rows, row);
         self.selected[row] = true;
     }
 
-    fn from(board: &Board, table: &BinaryTable) -> Self {
-        let mut view = Self {
-            columns: [true; N_CONSTRAINTS],
-            rows: [true; N_POSSIBILITIES],
-            selected: [false; N_POSSIBILITIES],
-        };
-
+    fn select_rows(&mut self, board: &Board) {
         for (i, row) in board.cells.iter().enumerate() {
             for (j, &cell) in row.iter().enumerate() {
                 if cell != 0 {
-                    view.select_row(table, (i * N + j) * N + cell as usize - 1);
+                    self.select_row((i * N + j) * N + cell as usize - 1);
                 }
             }
         }
-
-        return view;
     }
 
-    fn col_count(&self, col: usize, table: &BinaryTable) -> u8 {
-        return table.columns[col]
+    fn col_count(&self, col: &[bool]) -> u8 {
+        return col
             .iter()
             .zip(self.rows.iter())
             .map(|(&a, &b)| (a && b) as u8)
             .sum();
     }
 
-    fn col_row<'a>(
-        &'a self,
-        col: usize,
-        table: &'a BinaryTable,
-    ) -> impl Iterator<Item = usize> + 'a {
-        return table.columns[col]
+    fn col_row<'a>(&'a self, col: &'a [bool]) -> impl Iterator<Item = usize> + 'a {
+        return col
             .iter()
             .zip(self.rows.iter())
             .enumerate()
@@ -240,47 +231,23 @@ impl View {
             .map(|(i, _)| i);
     }
 
-    fn active_columns<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
-        return self
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, &v)| v)
-            .map(|(i, _)| i);
-    }
-
-    fn log_col_counts(&self, table: &BinaryTable) {
+    fn log_col_counts(&self) {
         if !(log_enabled!(Level::Trace)) {
             return;
         }
-        let mut counts: Vec<(usize, u8)> = self
-            .active_columns()
-            .map(|i| (i, self.col_count(i, table)))
-            .collect();
-        counts.sort_by_key(|(_, count)| *count);
-        for (i, count) in counts.iter() {
-            let row_names: Vec<String> = self
-                .col_row(*i, table)
-                .map(|r| row_num_to_name(r))
-                .collect();
-            trace!(
-                "{}: -> {} ({})",
-                col_num_to_name(*i),
-                row_names.join(", "),
-                count
-            );
-            assert_eq!(*count as usize, row_names.len());
+        let mut sorted_columns = self.columns.clone();
+        sorted_columns.sort_by_key(|col| self.col_count(col));
+        for col in sorted_columns.iter() {
+            let row_names: Vec<String> = self.col_row(col).map(|r| row_num_to_name(r)).collect();
+            trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
     }
 
-    fn next_move(&self, table: &BinaryTable) -> SearchResult {
-        if let Some(col) = self
-            .active_columns()
-            .min_by_key(|col| self.col_count(*col, table))
-        {
-            if let Some(row) = self.col_row(col, table).next() {
+    fn next_move(&self) -> SearchResult {
+        if let Some(col) = self.columns.iter().min_by_key(|&col| self.col_count(col)) {
+            if let Some(row) = self.col_row(col).next() {
                 return SearchResult::Possibility(Trace {
-                    pre_view: *self,
+                    pre_view: self.clone(),
                     possibility: row,
                 });
             } else {
@@ -298,21 +265,22 @@ fn col_sum(col: &[bool; N_POSSIBILITIES]) -> usize {
 
 impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
-        let mut table = BinaryTable {
-            columns: [[false; N_POSSIBILITIES]; N_CONSTRAINTS],
+        let mut view = View {
+            columns: vec![],
+            rows: [true; N_POSSIBILITIES],
+            selected: [false; N_POSSIBILITIES],
         };
-
-        let mut cols = table.columns.iter_mut();
 
         // row / col constraint
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: R{}C{}", i * N + j, i + 1, j + 1);
-                let col = cols.next().unwrap();
+                let mut col = [false; N_POSSIBILITIES];
                 for v in 0..N {
                     let row = (i * N + j) * N + v;
                     col[row] = true;
                 }
+                view.columns.push(col);
             }
         }
 
@@ -320,11 +288,12 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: R{}#{}", i * N + j + N * N, i + 1, j + 1);
-                let col = cols.next().unwrap();
+                let mut col = [false; N_POSSIBILITIES];
                 for v in 0..N {
                     let row = (i * N + v) * N + j;
                     col[row] = true;
                 }
+                view.columns.push(col);
             }
         }
 
@@ -332,11 +301,12 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: C{}#{}", i * N + j + 2 * N * N, i + 1, j + 1);
-                let col = cols.next().unwrap();
+                let mut col = [false; N_POSSIBILITIES];
                 for v in 0..N {
                     let row = (v * N + i) * N + j;
                     col[row] = true;
                 }
+                view.columns.push(col);
             }
         }
 
@@ -351,30 +321,25 @@ impl From<&Board> for Table {
                         b_j + 1,
                         j + 1
                     );
-                    let col = cols.next().unwrap();
+                    let mut col = [false; N_POSSIBILITIES];
                     for x in 0..3 {
                         for y in 0..3 {
                             let row = ((b_i * 3 + x) * N + b_j * 3 + y) * N + j;
                             col[row] = true;
                         }
                     }
+                    view.columns.push(col);
                 }
             }
         }
 
-        assert!(cols.next().is_none(), "Haven't filled all columns");
-
-        for (i, col) in table.columns.iter().enumerate() {
+        for (i, col) in view.columns.iter().enumerate() {
             assert_eq!(col_sum(col), N, "col {}", i);
         }
 
-        let view = View::from(board, &table);
+        view.select_rows(board);
         let traces = vec![];
-        return Self {
-            table,
-            view,
-            traces,
-        };
+        return Self { view, traces };
     }
 }
 
@@ -403,7 +368,7 @@ impl Iterator for Table {
         self.backtrack();
 
         loop {
-            match self.view.next_move(&self.table) {
+            match self.view.next_move() {
                 SearchResult::Invalid => {
                     if !self.backtrack() {
                         return None;
@@ -418,7 +383,7 @@ impl Iterator for Table {
                         row_num_to_name(trace.possibility),
                         self.traces.len()
                     );
-                    self.view.select_row(&self.table, trace.possibility);
+                    self.view.select_row(trace.possibility);
                     self.traces.push(trace);
                 }
             }
@@ -436,7 +401,7 @@ fn main() {
     let n_board = Board::from(&table.view);
     assert_eq!(board, n_board);
 
-    table.view.log_col_counts(&table.table);
+    table.view.log_col_counts();
 
     if log_enabled!(Level::Info) {
         for (i, solution) in table.enumerate() {
