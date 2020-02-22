@@ -4,7 +4,6 @@ use bit_set::BitSet;
 use log::{debug, error, info, trace, Level};
 use std::fmt;
 use std::io::{self, BufRead};
-// use hibitset::BitSet;
 
 const N: usize = 9;
 const N_COLS: usize = N;
@@ -163,6 +162,21 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
+#[inline]
+fn cover_columns(columns: &mut Vec<BitSet>, f: impl Fn(&BitSet) -> bool) {
+    let mut excluded = BitSet::new();
+    columns.retain(|col| {
+        let contains = f(col);
+        if contains {
+            excluded.union_with(col);
+        }
+        !contains
+    });
+    for col in columns {
+        col.difference_with(&excluded);
+    }
+}
+
 fn select_rows(columns: &mut Vec<BitSet>, board: &Board) -> BitSet {
     let rows = board
         .cells
@@ -180,17 +194,7 @@ fn select_rows(columns: &mut Vec<BitSet>, board: &Board) -> BitSet {
         .rev()
         .collect();
 
-    let mut excluded = BitSet::new();
-    columns.retain(|col| {
-        let contains = col.intersection(&rows).next().is_some();
-        if contains {
-            excluded.union_with(col);
-        }
-        !contains
-    });
-    for col in columns {
-        col.difference_with(&excluded);
-    }
+    cover_columns(columns, |col| col.intersection(&rows).next().is_some());
     return rows;
 }
 
@@ -198,23 +202,7 @@ impl View {
     fn select_row(&mut self, row: usize) {
         let added = self.selected.insert(row);
         assert!(added, "already selected row: {}", row_num_to_name(row));
-
-        let mut excluded = BitSet::new();
-        self.columns.retain(|col| {
-            let contains = col.contains(row);
-            if contains {
-                excluded.union_with(col);
-            }
-            !contains
-        });
-        assert!(
-            !excluded.is_empty(),
-            "invalid puzzle: {}",
-            row_num_to_name(row)
-        );
-        for col in self.columns.iter_mut() {
-            col.difference_with(&excluded);
-        }
+        cover_columns(&mut self.columns, |col| col.contains(row));
     }
 
     fn log_col_counts(&self) {
