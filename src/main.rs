@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 use log::{debug, error, info, trace, Level};
+use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, BufRead};
 // use hibitset::BitSet;
@@ -14,18 +15,11 @@ struct Board {
     cells: [[u8; N_COLS]; N_ROWS],
 }
 
-// columns
-#[allow(dead_code)]
-const N_CONSTRAINTS: usize = 4 * N_COLS * N_ROWS;
-
-// rows
-const N_POSSIBILITIES: usize = 9 * N_COLS * N_ROWS;
-
 #[derive(Clone)]
 struct View {
-    columns: Vec<[bool; N_POSSIBILITIES]>, //[[bool; N_POSSIBILITIES]; N_CONSTRAINTS],
-    rows: [bool; N_POSSIBILITIES],
-    selected: [bool; N_POSSIBILITIES],
+    columns: Vec<HashSet<usize>>,
+    rows: HashSet<usize>,
+    selected: HashSet<usize>,
 }
 
 struct Trace {
@@ -74,11 +68,9 @@ fn col_num_to_name(i: usize) -> String {
 impl From<&View> for Board {
     fn from(view: &View) -> Self {
         let mut cells = [[0; N]; N];
-        for (i, v) in view.selected.iter().enumerate() {
-            if *v {
-                let (x, y, z) = row_num_to_coords(i);
-                cells[x][y] = z;
-            }
+        for i in view.selected.iter() {
+            let (x, y, z) = row_num_to_coords(*i);
+            cells[x][y] = z;
         }
         return Self { cells: cells };
     }
@@ -171,37 +163,30 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
-fn select_row(
-    columns: &mut Vec<[bool; N_POSSIBILITIES]>,
-    rows: &mut [bool; N_POSSIBILITIES],
-    row: usize,
-) {
+fn select_row(columns: &mut Vec<HashSet<usize>>, rows: &mut HashSet<usize>, row: usize) {
     let mut i = 0;
     columns.retain(|col| {
         i += 1;
-        let remove = col[row];
-        if remove {
-            for (j, v) in col.iter().enumerate() {
-                if *v {
-                    rows[j] = false;
-                }
+        let contains = col.contains(&row);
+        if contains {
+            for v in col {
+                rows.insert(*v);
             }
         }
-
-        !remove
+        !contains
     });
 }
 
 impl View {
     fn select_row(&mut self, row: usize) {
+        let added = self.selected.insert(row);
+        assert!(added, "already selected row: {}", row_num_to_name(row));
         assert!(
-            !self.selected[row],
-            "already selected row: {}",
+            !self.rows.contains(&row),
+            "invalid puzzle: {}",
             row_num_to_name(row)
         );
-        assert!(self.rows[row], "invalid puzzle: {}", row_num_to_name(row));
         select_row(&mut self.columns, &mut self.rows, row);
-        self.selected[row] = true;
     }
 
     fn select_rows(&mut self, board: &Board) {
@@ -214,21 +199,8 @@ impl View {
         }
     }
 
-    fn col_count(&self, col: &[bool]) -> u8 {
-        return col
-            .iter()
-            .zip(self.rows.iter())
-            .map(|(&a, &b)| (a && b) as u8)
-            .sum();
-    }
-
-    fn col_row<'a>(&'a self, col: &'a [bool]) -> impl Iterator<Item = usize> + 'a {
-        return col
-            .iter()
-            .zip(self.rows.iter())
-            .enumerate()
-            .filter(|(_, (&a, &b))| a && b)
-            .map(|(i, _)| i);
+    fn col_count(&self, col: &HashSet<usize>) -> u8 {
+        return col.difference(&self.rows).count() as u8;
     }
 
     fn log_col_counts(&self) {
@@ -238,17 +210,20 @@ impl View {
         let mut sorted_columns = self.columns.clone();
         sorted_columns.sort_by_key(|col| self.col_count(col));
         for col in sorted_columns.iter() {
-            let row_names: Vec<String> = self.col_row(col).map(|r| row_num_to_name(r)).collect();
+            let row_names: Vec<String> = col
+                .difference(&self.rows)
+                .map(|&r| row_num_to_name(r))
+                .collect();
             trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
     }
 
     fn next_move(&self) -> SearchResult {
         if let Some(col) = self.columns.iter().min_by_key(|&col| self.col_count(col)) {
-            if let Some(row) = self.col_row(col).next() {
+            if let Some(row) = col.difference(&self.rows).next() {
                 return SearchResult::Possibility(Trace {
                     pre_view: self.clone(),
-                    possibility: row,
+                    possibility: *row,
                 });
             } else {
                 return SearchResult::Invalid;
@@ -259,27 +234,19 @@ impl View {
     }
 }
 
-fn col_sum(col: &[bool; N_POSSIBILITIES]) -> usize {
-    return col.iter().filter(|&&x| x).count();
-}
-
 impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
         let mut view = View {
             columns: vec![],
-            rows: [true; N_POSSIBILITIES],
-            selected: [false; N_POSSIBILITIES],
+            rows: HashSet::new(),
+            selected: HashSet::new(),
         };
 
         // row / col constraint
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: R{}C{}", i * N + j, i + 1, j + 1);
-                let mut col = [false; N_POSSIBILITIES];
-                for v in 0..N {
-                    let row = (i * N + j) * N + v;
-                    col[row] = true;
-                }
+                let col = (0..N).map(|v| (i * N + j) * N + v).collect();
                 view.columns.push(col);
             }
         }
@@ -288,11 +255,7 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: R{}#{}", i * N + j + N * N, i + 1, j + 1);
-                let mut col = [false; N_POSSIBILITIES];
-                for v in 0..N {
-                    let row = (i * N + v) * N + j;
-                    col[row] = true;
-                }
+                let col = (0..N).map(|v| (i * N + v) * N + j).collect();
                 view.columns.push(col);
             }
         }
@@ -301,11 +264,7 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 trace!("{:4}: C{}#{}", i * N + j + 2 * N * N, i + 1, j + 1);
-                let mut col = [false; N_POSSIBILITIES];
-                for v in 0..N {
-                    let row = (v * N + i) * N + j;
-                    col[row] = true;
-                }
+                let col = (0..N).map(|v| (v * N + i) * N + j).collect();
                 view.columns.push(col);
             }
         }
@@ -321,20 +280,21 @@ impl From<&Board> for Table {
                         b_j + 1,
                         j + 1
                     );
-                    let mut col = [false; N_POSSIBILITIES];
-                    for x in 0..3 {
-                        for y in 0..3 {
-                            let row = ((b_i * 3 + x) * N + b_j * 3 + y) * N + j;
-                            col[row] = true;
-                        }
-                    }
+
+                    let col = (0..N)
+                        .map(|v| {
+                            let x = v / 3;
+                            let y = v % 3;
+                            ((b_i * 3 + x) * N + b_j * 3 + y) * N + j
+                        })
+                        .collect();
                     view.columns.push(col);
                 }
             }
         }
 
         for (i, col) in view.columns.iter().enumerate() {
-            assert_eq!(col_sum(col), N, "col {}", i);
+            assert_eq!(col.len(), N, "col {}", i);
         }
 
         view.select_rows(board);
@@ -348,7 +308,7 @@ impl Table {
         return match self.traces.pop() {
             Some(trace) => {
                 self.view = trace.pre_view;
-                self.view.rows[trace.possibility] = false;
+                self.view.rows.insert(trace.possibility);
                 debug!(
                     "Backtracked   {} [c={}]",
                     row_num_to_name(trace.possibility),
