@@ -29,6 +29,7 @@ struct Trace {
 enum SearchResult {
     Invalid,
     Finished,
+    Selected(usize),
     Possibility(Trace),
 }
 
@@ -212,11 +213,16 @@ impl View {
 
     fn next_move(&self) -> SearchResult {
         if let Some(col) = self.columns.iter().min_by_key(|col| col.len()) {
-            if let Some(row) = col.iter().next() {
-                return SearchResult::Possibility(Trace {
-                    pre_view: self.clone(),
-                    possibility: row,
-                });
+            let mut iter = col.iter();
+            if let Some(row) = iter.next() {
+                if iter.next().is_none() {
+                    return SearchResult::Selected(row);
+                } else {
+                    return SearchResult::Possibility(Trace {
+                        pre_view: self.clone(),
+                        possibility: row,
+                    });
+                }
             } else {
                 return SearchResult::Invalid;
             }
@@ -236,7 +242,7 @@ impl From<&Board> for Table {
         // row / col constraint
         for i in 0..N {
             for j in 0..N {
-                trace!("{:4}: R{}C{}", i * N + j, i + 1, j + 1);
+                // row i, col j
                 let col = (0..N).map(|v| (i * N + j) * N + v).collect();
                 view.columns.push(col);
             }
@@ -245,7 +251,7 @@ impl From<&Board> for Table {
         // row-number constraint
         for i in 0..N {
             for j in 0..N {
-                trace!("{:4}: R{}#{}", i * N + j + N * N, i + 1, j + 1);
+                // row i, number j
                 let col = (0..N).map(|v| (i * N + v) * N + j).collect();
                 view.columns.push(col);
             }
@@ -254,7 +260,7 @@ impl From<&Board> for Table {
         // col-number constraint
         for i in 0..N {
             for j in 0..N {
-                trace!("{:4}: C{}#{}", i * N + j + 2 * N * N, i + 1, j + 1);
+                // col i, number j
                 let col = (0..N).map(|v| (v * N + i) * N + j).collect();
                 view.columns.push(col);
             }
@@ -264,28 +270,15 @@ impl From<&Board> for Table {
         for b_i in 0..3 {
             for b_j in 0..3 {
                 for j in 0..N {
-                    trace!(
-                        "{:4}: B{}{}#{}",
-                        (b_i * 3 + b_j) * N + j + 3 * N * N,
-                        b_i + 1,
-                        b_j + 1,
-                        j + 1
-                    );
-
-                    let col = (0..N)
-                        .map(|v| {
-                            let x = v / 3;
-                            let y = v % 3;
-                            ((b_i * 3 + x) * N + b_j * 3 + y) * N + j
+                    // block b_i/b_j, number j
+                    let col = (0..3)
+                        .flat_map(|x| {
+                            (0..3).map(move |y| ((b_i * 3 + x) * N + b_j * 3 + y) * N + j)
                         })
                         .collect();
                     view.columns.push(col);
                 }
             }
-        }
-
-        for (i, col) in view.columns.iter().enumerate() {
-            assert_eq!(col.len(), N, "col {}", i);
         }
 
         view.select_rows(board);
@@ -329,6 +322,9 @@ impl Iterator for Table {
                 }
                 SearchResult::Finished => {
                     return Some((&self.view).into());
+                }
+                SearchResult::Selected(row) => {
+                    self.view.select_row(row);
                 }
                 SearchResult::Possibility(trace) => {
                     debug!(
