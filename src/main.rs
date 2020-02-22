@@ -35,6 +35,7 @@ enum SearchResult {
 struct Table {
     view: View,
     traces: Vec<Trace>,
+    selected: bool,
 }
 
 fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
@@ -289,7 +290,11 @@ impl From<&Board> for Table {
         let selected = select_rows(&mut columns, board);
         let view = View { columns, selected };
         let traces = vec![];
-        return Self { view, traces };
+        return Self {
+            view,
+            traces,
+            selected: false,
+        };
     }
 }
 
@@ -317,7 +322,9 @@ impl Iterator for Table {
     type Item = Board;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.backtrack();
+        if self.selected && !self.backtrack() {
+            return None;
+        }
 
         loop {
             match self.view.next_move() {
@@ -327,6 +334,7 @@ impl Iterator for Table {
                     }
                 }
                 SearchResult::Finished => {
+                    self.selected = true;
                     return Some((&self.view).into());
                 }
                 SearchResult::Selected(row) => {
