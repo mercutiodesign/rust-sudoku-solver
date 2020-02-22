@@ -23,7 +23,7 @@ struct View {
 
 struct Trace {
     pre_view: View,
-    possibility: usize,
+    row: usize,
 }
 
 enum SearchResult {
@@ -163,39 +163,57 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
-fn select_row(columns: &mut Vec<BitSet>, row: usize) {
+fn select_rows(columns: &mut Vec<BitSet>, board: &Board) -> BitSet {
+    let rows = board
+        .cells
+        .iter()
+        .enumerate()
+        .flat_map(|(i, row)| {
+            row.iter().enumerate().filter_map(move |(j, &cell)| {
+                if cell != 0 {
+                    Some((i * N + j) * N + cell as usize - 1)
+                } else {
+                    None
+                }
+            })
+        })
+        .rev()
+        .collect();
+
     let mut excluded = BitSet::new();
     columns.retain(|col| {
-        let contains = col.contains(row);
+        let contains = col.intersection(&rows).next().is_some();
         if contains {
             excluded.union_with(col);
         }
         !contains
     });
-    assert!(
-        !excluded.is_empty(),
-        "invalid puzzle: {}",
-        row_num_to_name(row)
-    );
     for col in columns {
         col.difference_with(&excluded);
     }
+    return rows;
 }
 
 impl View {
     fn select_row(&mut self, row: usize) {
         let added = self.selected.insert(row);
         assert!(added, "already selected row: {}", row_num_to_name(row));
-        select_row(&mut self.columns, row);
-    }
 
-    fn select_rows(&mut self, board: &Board) {
-        for (i, row) in board.cells.iter().enumerate() {
-            for (j, &cell) in row.iter().enumerate() {
-                if cell != 0 {
-                    self.select_row((i * N + j) * N + cell as usize - 1);
-                }
+        let mut excluded = BitSet::new();
+        self.columns.retain(|col| {
+            let contains = col.contains(row);
+            if contains {
+                excluded.union_with(col);
             }
+            !contains
+        });
+        assert!(
+            !excluded.is_empty(),
+            "invalid puzzle: {}",
+            row_num_to_name(row)
+        );
+        for col in self.columns.iter_mut() {
+            col.difference_with(&excluded);
         }
     }
 
@@ -206,7 +224,7 @@ impl View {
         let mut sorted_columns = self.columns.clone();
         sorted_columns.sort_by_key(|col| col.len());
         for col in sorted_columns.iter() {
-            let row_names: Vec<String> = col.iter().map(|r| row_num_to_name(r)).collect();
+            let row_names: Vec<String> = col.iter().map(row_num_to_name).collect();
             trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
     }
@@ -216,11 +234,12 @@ impl View {
             let mut iter = col.iter();
             if let Some(row) = iter.next() {
                 if iter.next().is_none() {
+                    // only choice for this row
                     return SearchResult::Selected(row);
                 } else {
                     return SearchResult::Possibility(Trace {
                         pre_view: self.clone(),
-                        possibility: row,
+                        row: row,
                     });
                 }
             } else {
@@ -234,17 +253,14 @@ impl View {
 
 impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
-        let mut view = View {
-            columns: vec![],
-            selected: BitSet::new(),
-        };
+        let mut columns = Vec::with_capacity(N * N * 4);
 
         // row / col constraint
         for i in 0..N {
             for j in 0..N {
                 // row i, col j
-                let col = (0..N).map(|v| (i * N + j) * N + v).collect();
-                view.columns.push(col);
+                let col = (0..N).map(|v| (i * N + j) * N + v).rev().collect();
+                columns.push(col);
             }
         }
 
@@ -252,8 +268,8 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 // row i, number j
-                let col = (0..N).map(|v| (i * N + v) * N + j).collect();
-                view.columns.push(col);
+                let col = (0..N).map(|v| (i * N + v) * N + j).rev().collect();
+                columns.push(col);
             }
         }
 
@@ -261,8 +277,8 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 // col i, number j
-                let col = (0..N).map(|v| (v * N + i) * N + j).collect();
-                view.columns.push(col);
+                let col = (0..N).map(|v| (v * N + i) * N + j).rev().collect();
+                columns.push(col);
             }
         }
 
@@ -275,13 +291,15 @@ impl From<&Board> for Table {
                         .flat_map(|x| {
                             (0..3).map(move |y| ((b_i * 3 + x) * N + b_j * 3 + y) * N + j)
                         })
+                        .rev()
                         .collect();
-                    view.columns.push(col);
+                    columns.push(col);
                 }
             }
         }
 
-        view.select_rows(board);
+        let selected = select_rows(&mut columns, board);
+        let view = View { columns, selected };
         let traces = vec![];
         return Self { view, traces };
     }
@@ -293,11 +311,11 @@ impl Table {
             Some(trace) => {
                 self.view = trace.pre_view;
                 for col in self.view.columns.iter_mut() {
-                    col.remove(trace.possibility);
+                    col.remove(trace.row);
                 }
                 debug!(
                     "Backtracked   {} [c={}]",
-                    row_num_to_name(trace.possibility),
+                    row_num_to_name(trace.row),
                     self.traces.len()
                 );
                 true
@@ -329,10 +347,10 @@ impl Iterator for Table {
                 SearchResult::Possibility(trace) => {
                     debug!(
                         "Branched into {} [c={}]",
-                        row_num_to_name(trace.possibility),
+                        row_num_to_name(trace.row),
                         self.traces.len()
                     );
-                    self.view.select_row(trace.possibility);
+                    self.view.select_row(trace.row);
                     self.traces.push(trace);
                 }
             }
