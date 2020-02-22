@@ -18,7 +18,6 @@ struct Board {
 #[derive(Clone)]
 struct View {
     columns: Vec<BitSet>,
-    rows: BitSet,
     selected: BitSet,
 }
 
@@ -163,28 +162,30 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
-fn select_row(columns: &mut Vec<BitSet>, rows: &mut BitSet, row: usize) {
-    let mut i = 0;
+fn select_row(columns: &mut Vec<BitSet>, row: usize) {
+    let mut excluded = BitSet::new();
     columns.retain(|col| {
-        i += 1;
         let contains = col.contains(row);
         if contains {
-            rows.union_with(col);
+            excluded.union_with(col);
         }
         !contains
     });
+    assert!(
+        !excluded.is_empty(),
+        "invalid puzzle: {}",
+        row_num_to_name(row)
+    );
+    for col in columns {
+        col.difference_with(&excluded);
+    }
 }
 
 impl View {
     fn select_row(&mut self, row: usize) {
         let added = self.selected.insert(row);
         assert!(added, "already selected row: {}", row_num_to_name(row));
-        assert!(
-            !self.rows.contains(row),
-            "invalid puzzle: {}",
-            row_num_to_name(row)
-        );
-        select_row(&mut self.columns, &mut self.rows, row);
+        select_row(&mut self.columns, row);
     }
 
     fn select_rows(&mut self, board: &Board) {
@@ -197,28 +198,21 @@ impl View {
         }
     }
 
-    fn col_count(&self, col: &BitSet) -> u8 {
-        return col.difference(&self.rows).count() as u8;
-    }
-
     fn log_col_counts(&self) {
         if !(log_enabled!(Level::Trace)) {
             return;
         }
         let mut sorted_columns = self.columns.clone();
-        sorted_columns.sort_by_key(|col| self.col_count(col));
+        sorted_columns.sort_by_key(|col| col.len());
         for col in sorted_columns.iter() {
-            let row_names: Vec<String> = col
-                .difference(&self.rows)
-                .map(|r| row_num_to_name(r))
-                .collect();
+            let row_names: Vec<String> = col.iter().map(|r| row_num_to_name(r)).collect();
             trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
     }
 
     fn next_move(&self) -> SearchResult {
-        if let Some(col) = self.columns.iter().min_by_key(|&col| self.col_count(col)) {
-            if let Some(row) = col.difference(&self.rows).next() {
+        if let Some(col) = self.columns.iter().min_by_key(|col| col.len()) {
+            if let Some(row) = col.iter().next() {
                 return SearchResult::Possibility(Trace {
                     pre_view: self.clone(),
                     possibility: row,
@@ -236,7 +230,6 @@ impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
         let mut view = View {
             columns: vec![],
-            rows: BitSet::new(),
             selected: BitSet::new(),
         };
 
@@ -306,7 +299,9 @@ impl Table {
         return match self.traces.pop() {
             Some(trace) => {
                 self.view = trace.pre_view;
-                self.view.rows.insert(trace.possibility);
+                for col in self.view.columns.iter_mut() {
+                    col.remove(trace.possibility);
+                }
                 debug!(
                     "Backtracked   {} [c={}]",
                     row_num_to_name(trace.possibility),
