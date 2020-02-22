@@ -24,15 +24,28 @@ struct BinaryTable {
     columns: [[bool; N_POSSIBILITIES]; N_CONSTRAINTS],
 }
 
+#[derive(Clone, Copy)]
 struct View {
     columns: [bool; N_CONSTRAINTS],
     rows: [bool; N_POSSIBILITIES],
     selected: [bool; N_POSSIBILITIES],
 }
 
+struct Trace {
+    pre_view: View,
+    possibility: usize,
+}
+
+enum SearchResult {
+    Invalid,
+    Finished,
+    Possibility(Trace),
+}
+
 struct Table {
     table: BinaryTable,
     view: View,
+    traces: Vec<Trace>,
 }
 
 fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
@@ -163,8 +176,20 @@ fn read_board() -> io::Result<Board> {
 
 impl View {
     fn select_row(&mut self, table: &BinaryTable, row: usize) {
+        assert!(
+            !self.selected[row],
+            "already selected row: {}",
+            row_num_to_name(row)
+        );
+        assert!(self.rows[row], "invalid puzzle: {}", row_num_to_name(row));
         for (i, col) in table.columns.iter().enumerate() {
-            if col[row] && self.columns[i] {
+            if col[row] {
+                assert!(
+                    self.columns[i],
+                    "invalid puzzle: {} violates {}",
+                    row_num_to_name(row),
+                    col_num_to_name(i)
+                );
                 self.columns[i] = false;
                 for (j, v) in col.iter().enumerate() {
                     if *v {
@@ -225,7 +250,7 @@ impl View {
     }
 
     fn log_col_counts(&self, table: &BinaryTable) {
-        if !(log_enabled!(Level::Debug)) {
+        if !(log_enabled!(Level::Trace)) {
             return;
         }
         let mut counts: Vec<(usize, u8)> = self
@@ -238,13 +263,31 @@ impl View {
                 .col_row(*i, table)
                 .map(|r| row_num_to_name(r))
                 .collect();
-            debug!(
+            trace!(
                 "{}: -> {} ({})",
                 col_num_to_name(*i),
                 row_names.join(", "),
                 count
             );
             assert_eq!(*count as usize, row_names.len());
+        }
+    }
+
+    fn next_move(&self, table: &BinaryTable) -> SearchResult {
+        if let Some(col) = self
+            .active_columns()
+            .min_by_key(|col| self.col_count(*col, table))
+        {
+            if let Some(row) = self.col_row(col, table).next() {
+                return SearchResult::Possibility(Trace {
+                    pre_view: *self,
+                    possibility: row,
+                });
+            } else {
+                return SearchResult::Invalid;
+            }
+        } else {
+            return SearchResult::Finished;
         }
     }
 }
@@ -326,8 +369,60 @@ impl From<&Board> for Table {
         }
 
         let view = View::from(board, &table);
+        let traces = vec![];
+        return Self {
+            table,
+            view,
+            traces,
+        };
+    }
+}
 
-        return Self { table, view };
+impl Table {
+    fn backtrack(&mut self) -> bool {
+        return match self.traces.pop() {
+            Some(trace) => {
+                self.view = trace.pre_view;
+                self.view.rows[trace.possibility] = false;
+                debug!(
+                    "Backtracked   {} [c={}]",
+                    row_num_to_name(trace.possibility),
+                    self.traces.len()
+                );
+                true
+            }
+            None => false,
+        };
+    }
+}
+
+impl Iterator for Table {
+    type Item = Board;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.backtrack();
+
+        loop {
+            match self.view.next_move(&self.table) {
+                SearchResult::Invalid => {
+                    if !self.backtrack() {
+                        return None;
+                    }
+                }
+                SearchResult::Finished => {
+                    return Some((&self.view).into());
+                }
+                SearchResult::Possibility(trace) => {
+                    debug!(
+                        "Branched into {} [c={}]",
+                        row_num_to_name(trace.possibility),
+                        self.traces.len()
+                    );
+                    self.view.select_row(&self.table, trace.possibility);
+                    self.traces.push(trace);
+                }
+            }
+        }
     }
 }
 
@@ -336,20 +431,23 @@ fn main() {
     let board = read_board().unwrap();
     debug!("solving:\n{:b}", board);
 
-    let table = Table::from(&board);
+    let mut table = Table::from(&board);
 
     let n_board = Board::from(&table.view);
     assert_eq!(board, n_board);
 
-    if board.cells.len() < 9 {
-        debug!("");
-        trace!("");
-        info!("");
-    }
-
     table.view.log_col_counts(&table.table);
 
-    // board.find_possibilities();
-
-    // println!("{:b}", board);
+    if log_enabled!(Level::Info) {
+        for (i, solution) in table.enumerate() {
+            info!("solution {}:\n{:b}", i + 1, solution);
+        }
+    } else {
+        if let Some(solution) = table.next() {
+            println!("{:b}", solution);
+        } else {
+            println!("No solution found");
+            std::process::exit(2);
+        }
+    }
 }
