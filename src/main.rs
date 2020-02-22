@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
+use bit_set::BitSet;
 use log::{debug, error, info, trace, Level};
-use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, BufRead};
 // use hibitset::BitSet;
@@ -17,9 +17,9 @@ struct Board {
 
 #[derive(Clone)]
 struct View {
-    columns: Vec<HashSet<usize>>,
-    rows: HashSet<usize>,
-    selected: HashSet<usize>,
+    columns: Vec<BitSet>,
+    rows: BitSet,
+    selected: BitSet,
 }
 
 struct Trace {
@@ -69,7 +69,7 @@ impl From<&View> for Board {
     fn from(view: &View) -> Self {
         let mut cells = [[0; N]; N];
         for i in view.selected.iter() {
-            let (x, y, z) = row_num_to_coords(*i);
+            let (x, y, z) = row_num_to_coords(i);
             cells[x][y] = z;
         }
         return Self { cells: cells };
@@ -163,15 +163,13 @@ fn read_board() -> io::Result<Board> {
     return Ok(board);
 }
 
-fn select_row(columns: &mut Vec<HashSet<usize>>, rows: &mut HashSet<usize>, row: usize) {
+fn select_row(columns: &mut Vec<BitSet>, rows: &mut BitSet, row: usize) {
     let mut i = 0;
     columns.retain(|col| {
         i += 1;
-        let contains = col.contains(&row);
+        let contains = col.contains(row);
         if contains {
-            for v in col {
-                rows.insert(*v);
-            }
+            rows.union_with(col);
         }
         !contains
     });
@@ -182,7 +180,7 @@ impl View {
         let added = self.selected.insert(row);
         assert!(added, "already selected row: {}", row_num_to_name(row));
         assert!(
-            !self.rows.contains(&row),
+            !self.rows.contains(row),
             "invalid puzzle: {}",
             row_num_to_name(row)
         );
@@ -199,7 +197,7 @@ impl View {
         }
     }
 
-    fn col_count(&self, col: &HashSet<usize>) -> u8 {
+    fn col_count(&self, col: &BitSet) -> u8 {
         return col.difference(&self.rows).count() as u8;
     }
 
@@ -212,7 +210,7 @@ impl View {
         for col in sorted_columns.iter() {
             let row_names: Vec<String> = col
                 .difference(&self.rows)
-                .map(|&r| row_num_to_name(r))
+                .map(|r| row_num_to_name(r))
                 .collect();
             trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
@@ -223,7 +221,7 @@ impl View {
             if let Some(row) = col.difference(&self.rows).next() {
                 return SearchResult::Possibility(Trace {
                     pre_view: self.clone(),
-                    possibility: *row,
+                    possibility: row,
                 });
             } else {
                 return SearchResult::Invalid;
@@ -238,8 +236,8 @@ impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
         let mut view = View {
             columns: vec![],
-            rows: HashSet::new(),
-            selected: HashSet::new(),
+            rows: BitSet::new(),
+            selected: BitSet::new(),
         };
 
         // row / col constraint

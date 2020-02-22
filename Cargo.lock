@@ -21,6 +21,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e84c238982c4b1e1ee668d136c510c67a13465279c0cb367ea6baf6310620a80"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f59bbe95d4e52a6398ec21238d31577f2b28a9d86807f06ca59d191d8440d0bb"
+
+[[package]]
 name = "cfg-if"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +137,7 @@ checksum = "b28dfe3fe9badec5dbf0a79a9cccad2cfc2ab5484bdb3e44cbd1ae8b3ba2be06"
 name = "sudoku"
 version = "0.1.0"
 dependencies = [
+ "bit-set",
  "log",
  "pretty_env_logger",
 ]
