@@ -15,8 +15,14 @@ struct Board {
 }
 
 #[derive(Clone)]
+struct Column {
+    len: u8,
+    data: BitSet,
+}
+
+#[derive(Clone)]
 struct View {
-    columns: Vec<BitSet>,
+    columns: Vec<Column>,
     selected: BitSet,
 }
 
@@ -164,21 +170,24 @@ fn read_board() -> io::Result<Board> {
 }
 
 #[inline]
-fn cover_columns(columns: &mut Vec<BitSet>, f: impl Fn(&BitSet) -> bool) {
+fn cover_columns(columns: &mut Vec<Column>, f: impl Fn(&BitSet) -> bool) {
     let mut excluded = BitSet::new();
     columns.retain(|col| {
-        let contains = f(col);
+        let contains = f(&col.data);
         if contains {
-            excluded.union_with(col);
+            excluded.union_with(&col.data);
         }
         !contains
     });
     for col in columns {
-        col.difference_with(&excluded);
+        if col.data.intersection(&excluded).next().is_some() {
+            col.data.difference_with(&excluded);
+            col.len = col.data.len() as u8;
+        }
     }
 }
 
-fn select_rows(columns: &mut Vec<BitSet>, board: &Board) -> BitSet {
+fn select_rows(columns: &mut Vec<Column>, board: &Board) -> BitSet {
     let rows = board
         .cells
         .iter()
@@ -211,16 +220,16 @@ impl View {
             return;
         }
         let mut sorted_columns = self.columns.clone();
-        sorted_columns.sort_by_key(|col| col.len());
+        sorted_columns.sort_by_key(|col| col.len);
         for col in sorted_columns.iter() {
-            let row_names: Vec<String> = col.iter().map(row_num_to_name).collect();
+            let row_names: Vec<String> = col.data.iter().map(row_num_to_name).collect();
             trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
         }
     }
 
     fn next_move(&self) -> SearchResult {
-        if let Some(col) = self.columns.iter().min_by_key(|col| col.len()) {
-            let mut iter = col.iter();
+        if let Some(col) = self.columns.iter().min_by_key(|col| col.len) {
+            let mut iter = col.data.iter();
             if let Some(row) = iter.next() {
                 if iter.next().is_none() {
                     // only choice for this row
@@ -249,7 +258,7 @@ impl From<&Board> for Table {
             for j in 0..N {
                 // row i, col j
                 let col = (0..N).map(|v| (i * N + j) * N + v).rev().collect();
-                columns.push(col);
+                columns.push(Column { data: col, len: 9 });
             }
         }
 
@@ -258,7 +267,7 @@ impl From<&Board> for Table {
             for j in 0..N {
                 // row i, number j
                 let col = (0..N).map(|v| (i * N + v) * N + j).rev().collect();
-                columns.push(col);
+                columns.push(Column { data: col, len: 9 });
             }
         }
 
@@ -267,7 +276,7 @@ impl From<&Board> for Table {
             for j in 0..N {
                 // col i, number j
                 let col = (0..N).map(|v| (v * N + i) * N + j).rev().collect();
-                columns.push(col);
+                columns.push(Column { data: col, len: 9 });
             }
         }
 
@@ -282,7 +291,7 @@ impl From<&Board> for Table {
                         })
                         .rev()
                         .collect();
-                    columns.push(col);
+                    columns.push(Column { data: col, len: 9 });
                 }
             }
         }
@@ -304,7 +313,9 @@ impl Table {
             Some(trace) => {
                 self.view = trace.pre_view;
                 for col in self.view.columns.iter_mut() {
-                    col.remove(trace.row);
+                    if col.data.remove(trace.row) {
+                        col.len -= 1;
+                    }
                 }
                 debug!(
                     "Backtracked   {} [c={}]",
