@@ -16,6 +16,8 @@ struct Board {
 struct Column {
     len: u8,
     data: BitSet,
+    name: String,
+    optional: bool,
 }
 
 #[derive(Clone)]
@@ -40,6 +42,24 @@ struct Table {
     view: View,
     traces: Vec<Trace>,
     selected: bool,
+}
+
+struct RowBitSet<'a> {
+    data: &'a BitSet,
+}
+
+impl fmt::Display for RowBitSet<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.data.iter().map(row_num_to_name))
+            .finish()
+    }
+}
+
+impl fmt::Debug for RowBitSet<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
@@ -173,10 +193,12 @@ fn cover_columns(columns: &mut Vec<Column>, f: impl Fn(&BitSet) -> bool) {
     columns.retain(|col| {
         let contains = f(&col.data);
         if contains {
+            trace!("excluding {}", col);
             excluded.union_with(&col.data);
         }
         !contains
     });
+    trace!("excluded rows {}", RowBitSet { data: &excluded });
     for col in columns {
         if col.data.intersection(&excluded).next().is_some() {
             col.data.difference_with(&excluded);
@@ -191,19 +213,44 @@ fn select_rows(columns: &mut Vec<Column>, board: &Board) -> BitSet {
         .iter()
         .enumerate()
         .flat_map(|(i, row)| {
-            row.iter().enumerate().filter_map(move |(j, &cell)| {
-                if cell != 0 {
-                    Some((i * N + j) * N + cell as usize - 1)
-                } else {
-                    None
-                }
-            })
+            row.iter()
+                .enumerate()
+                .filter(|(_, &cell)| cell != 0)
+                .map(move |(j, &cell)| (i * N + j) * N + cell as usize - 1)
         })
         .rev()
         .collect();
 
+    trace!("covering rows {}", RowBitSet { data: &rows });
+
     cover_columns(columns, |col| col.intersection(&rows).next().is_some());
     return rows;
+}
+
+impl fmt::Debug for Column {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let options = RowBitSet { data: &self.data };
+
+        f.debug_struct("Column")
+            .field("name", &self.name)
+            .field("options", &options)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl fmt::Display for Column {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let options = RowBitSet { data: &self.data };
+        write!(
+            f,
+            "col {} -> {} [{}]{}",
+            self.name,
+            options,
+            self.len,
+            if self.optional { "?" } else { "" }
+        )
+    }
 }
 
 impl View {
@@ -218,15 +265,20 @@ impl View {
             return;
         }
         let mut sorted_columns = self.columns.clone();
-        sorted_columns.sort_by_key(|col| col.len);
-        for col in sorted_columns.iter() {
-            let row_names: Vec<String> = col.data.iter().map(row_num_to_name).collect();
-            trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
+        sorted_columns.sort_by_key(|col| (col.optional, col.len));
+        for col in sorted_columns.iter().take(10) {
+            trace!("{}", col);
         }
     }
 
     fn next_move(&self) -> SearchResult {
-        if let Some(col) = self.columns.iter().min_by_key(|col| col.len) {
+        if let Some(col) = self
+            .columns
+            .iter()
+            .filter(|col| !col.optional)
+            .min_by_key(|col| col.len)
+        {
+            debug!("Picked {}", col);
             let mut iter = col.data.iter();
             if let Some(row) = iter.next() {
                 if iter.next().is_none() {
@@ -247,6 +299,31 @@ impl View {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KnightsMove {
+    R1U2,
+    R2U1,
+    R2D1,
+    R1D2,
+}
+
+impl KnightsMove {
+    fn shift(&self, i: usize, j: usize) -> Option<usize> {
+        let (x, y) = match self {
+            KnightsMove::R1U2 => (i + 1, j.checked_sub(2)?),
+            KnightsMove::R2U1 => (i + 2, j.checked_sub(1)?),
+            KnightsMove::R2D1 => (i + 2, j + 1),
+            KnightsMove::R1D2 => (i + 1, j + 2),
+        };
+
+        if x < N && y < N {
+            return Some((x * N + y) * N);
+        } else {
+            None
+        }
+    }
+}
+
 impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
         let mut columns = Vec::with_capacity(N * N * 4);
@@ -255,8 +332,15 @@ impl From<&Board> for Table {
         for i in 0..N {
             for j in 0..N {
                 // row i, col j
+                // this can be read as:
+                // if any v is at the spot i, j it means no other v may be placed here
                 let col = (0..N).map(|v| (i * N + j) * N + v).rev().collect();
-                columns.push(Column { data: col, len: 9 });
+                columns.push(Column {
+                    data: col,
+                    len: 9,
+                    name: format!("r{}c{}", i + 1, j + 1),
+                    optional: false,
+                });
             }
         }
 
@@ -265,7 +349,12 @@ impl From<&Board> for Table {
             for j in 0..N {
                 // row i, number j
                 let col = (0..N).map(|v| (i * N + v) * N + j).rev().collect();
-                columns.push(Column { data: col, len: 9 });
+                columns.push(Column {
+                    data: col,
+                    len: 9,
+                    name: format!("r{}#{}", i + 1, j + 1),
+                    optional: false,
+                });
             }
         }
 
@@ -274,7 +363,12 @@ impl From<&Board> for Table {
             for j in 0..N {
                 // col i, number j
                 let col = (0..N).map(|v| (v * N + i) * N + j).rev().collect();
-                columns.push(Column { data: col, len: 9 });
+                columns.push(Column {
+                    data: col,
+                    len: 9,
+                    name: format!("c{}#{}", i + 1, j + 1),
+                    optional: false,
+                });
             }
         }
 
@@ -289,13 +383,72 @@ impl From<&Board> for Table {
                         })
                         .rev()
                         .collect();
-                    columns.push(Column { data: col, len: 9 });
+                    columns.push(Column {
+                        data: col,
+                        len: 9,
+                        name: format!("b{}{}#{}", b_i + 1, b_j + 1, j + 1),
+                        optional: false,
+                    });
+                }
+            }
+        }
+
+        // diagonals for magic sudoku
+        for i in 0..N {
+            // number i on the main diagonal
+            // number i at any of the v, v spots implies i isn't at any other v v spot
+            let col = (0..N).map(|v| (v * N + v) * N + i).rev().collect();
+            columns.push(Column {
+                data: col,
+                len: 9,
+                name: format!("d1#{}", i + 1),
+                optional: false,
+            });
+        }
+        for i in 0..N {
+            // number i on the main diagonal
+            // number i at any of the v, v spots implies i isn't at any other v v spot
+            let col = (0..N).map(|v| (v * N + N - 1 - v) * N + i).rev().collect();
+            columns.push(Column {
+                data: col,
+                len: 9,
+                name: format!("d2#{}", i + 1),
+                optional: false,
+            });
+        }
+
+        // knight's move constraint
+        let moves = [
+            KnightsMove::R1U2,
+            KnightsMove::R2U1,
+            KnightsMove::R2D1,
+            KnightsMove::R1D2,
+        ];
+        for i in 0..N {
+            for j in 0..N - 1 {
+                let source = (i * N + j) * N;
+                for m in &moves {
+                    // check if the move is valid:
+                    if let Some(target) = m.shift(i, j) {
+                        for k in 0..N {
+                            let mut data = BitSet::new();
+                            data.insert(source + k);
+                            data.insert(target + k);
+                            columns.push(Column {
+                                data,
+                                len: 2,
+                                name: format!("k{}{}{:?}#{}", i + 1, j + 1, m, k + 1),
+                                optional: true,
+                            });
+                        }
+                    }
                 }
             }
         }
 
         let selected = select_rows(&mut columns, board);
         let view = View { columns, selected };
+
         let traces = vec![];
         return Self {
             view,
