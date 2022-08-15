@@ -1,47 +1,63 @@
-#[macro_use]
-extern crate log;
-use bit_set::BitSet;
-use log::{debug, error, info, trace, Level};
-use std::fmt;
+use log::{debug, error, info, log_enabled, trace, warn, Level};
+use std::collections::HashMap;
 use std::io::{self, BufRead};
+use std::{fmt, mem};
 
+// board parameters
 const N: usize = 9;
 const N_COLS: usize = N;
 const N_ROWS: usize = N;
+const N_NODE_COLS: usize = 4 * N_COLS * N_ROWS;
+const N_NODE_COUNT: usize = N * N_NODE_COLS;
+const N_GRID_COUNT: usize = (N + 1) * N_NODE_COLS + 1;
+
+// index must be big enough to handle values up to 4 * N^3 (= N_NODE_COUNT)
+type Index = u16;
+type ColSize = u8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Board {
     cells: [[u8; N_COLS]; N_ROWS],
 }
 
-#[derive(Clone)]
-struct Column {
-    len: u8,
-    data: BitSet,
+struct Node {
+    left: Index,
+    right: Index,
+    up: Index,
+    down: Index,
+    column: Index,
 }
 
-#[derive(Clone)]
 struct View {
-    columns: Vec<Column>,
-    selected: BitSet,
+    nodes: Vec<Node>,
+    sizes: [ColSize; N_NODE_COLS],
 }
 
-struct Trace {
-    pre_view: View,
-    row: usize,
-}
-
-enum SearchResult {
-    Invalid,
+enum SearchState {
+    Begin,
+    SolutionFound,
+    Cover,
+    Uncover,
     Finished,
-    Selected(usize),
-    Possibility(Trace),
 }
 
 struct Table {
     view: View,
-    traces: Vec<Trace>,
-    selected: bool,
+    given: Vec<Index>,    // row numbers * 4
+    selected: Vec<Index>, // row numbers * 4
+    search_state: SearchState,
+}
+
+impl Node {
+    fn new(i: Index, column: Index) -> Self {
+        Self {
+            left: i,
+            right: i,
+            up: i,
+            down: i,
+            column,
+        }
+    }
 }
 
 fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
@@ -49,39 +65,41 @@ fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
     let y = (i / N) % N;
     let z = i % N;
 
-    return (x, y, z as u8 + 1);
-}
-
-fn row_num_to_name(i: usize) -> String {
-    let (x, y, z) = row_num_to_coords(i);
-    return format!("R{}C{}#{}", x + 1, y + 1, z);
+    (x, y, z as u8 + 1)
 }
 
 #[allow(dead_code)]
+fn row_num_to_name(i: usize) -> String {
+    let (x, y, z) = row_num_to_coords(i);
+    format!("R{}C{}#{}", x + 1, y + 1, z)
+}
+
 fn col_num_to_name(i: usize) -> String {
     let j = i % (N * N);
     let x = j / N;
     let y = j % N + 1;
-    return match i / (N * N) {
+    match i / (N * N) {
         0 => format!("R{}C{}", x + 1, y),
         1 => format!("R{}#{}", x + 1, y),
         2 => format!("C{}#{}", x + 1, y),
         3 => format!("B{}{}#{}", x / 3 + 1, x % 3 + 1, y),
+        4 => format!("h{}", j),
         _ => panic!("{}?", i),
-    };
-}
-
-impl From<&View> for Board {
-    fn from(view: &View) -> Self {
-        let mut cells = [[0; N]; N];
-        for i in view.selected.iter() {
-            let (x, y, z) = row_num_to_coords(i);
-            cells[x][y] = z;
-        }
-        return Self { cells: cells };
     }
 }
 
+impl From<&Table> for Board {
+    fn from(table: &Table) -> Self {
+        let mut cells = [[0; N]; N];
+        for &i in table.given.iter().chain(table.selected.iter()) {
+            let (x, y, z) = row_num_to_coords(i as usize / 4);
+            cells[x][y] = z;
+        }
+        Self { cells }
+    }
+}
+
+// long form representation of the board
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let divider = true;
@@ -109,6 +127,7 @@ impl fmt::Display for Board {
     }
 }
 
+// shorter representation of the board (just the values)
 impl fmt::Binary for Board {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut first = true;
@@ -166,166 +185,318 @@ fn read_board() -> io::Result<Board> {
         }
     }
 
-    return Ok(board);
+    Ok(board)
 }
 
-#[inline]
-fn cover_columns(columns: &mut Vec<Column>, f: impl Fn(&BitSet) -> bool) {
-    let mut excluded = BitSet::new();
-    columns.retain(|col| {
-        let contains = f(&col.data);
-        if contains {
-            excluded.union_with(&col.data);
-        }
-        !contains
-    });
-    for col in columns {
-        if col.data.intersection(&excluded).next().is_some() {
-            col.data.difference_with(&excluded);
-            col.len = col.data.len() as u8;
-        }
+fn row_insert(nodes: &mut Vec<Node>, node: &mut Node, row: usize) {
+    if let Some(n) = nodes.get_mut(row) {
+        mem::swap(&mut n.left, &mut node.left);
+    }
+    if let Some(n) = nodes.get_mut(node.left as usize) {
+        mem::swap(&mut n.right, &mut node.right);
     }
 }
 
-fn select_rows(columns: &mut Vec<Column>, board: &Board) -> BitSet {
-    let rows = board
-        .cells
-        .iter()
-        .enumerate()
-        .flat_map(|(i, row)| {
-            row.iter().enumerate().filter_map(move |(j, &cell)| {
-                if cell != 0 {
-                    Some((i * N + j) * N + cell as usize - 1)
-                } else {
-                    None
-                }
-            })
-        })
-        .rev()
-        .collect();
-
-    cover_columns(columns, |col| col.intersection(&rows).next().is_some());
-    return rows;
+fn col_insert(nodes: &mut Vec<Node>, node: &mut Node, col: Index) {
+    if let Some(n) = nodes.get_mut(col as usize) {
+        mem::swap(&mut n.up, &mut node.up);
+    }
+    if let Some(n) = nodes.get_mut(node.up as usize) {
+        mem::swap(&mut n.down, &mut node.down);
+    }
 }
 
-impl View {
-    fn select_row(&mut self, row: usize) {
-        let added = self.selected.insert(row);
-        assert!(added, "already selected row: {}", row_num_to_name(row));
-        cover_columns(&mut self.columns, |col| col.contains(row));
+fn check_col_count(nodes: &Vec<Node>, size: ColSize, col_start: Index) -> bool {
+    let mut next = col_start;
+    let mut count = 0;
+    loop {
+        debug_assert_eq!(nodes[next as usize].column, col_start);
+        next = nodes[next as usize].down;
+        count += 1;
+        if next == col_start {
+            break;
+        }
     }
+    debug_assert_eq!(count, size);
+    count == size
+}
 
-    fn log_col_counts(&self) {
-        if !(log_enabled!(Level::Trace)) {
-            return;
-        }
-        let mut sorted_columns = self.columns.clone();
-        sorted_columns.sort_by_key(|col| col.len);
-        for col in sorted_columns.iter() {
-            let row_names: Vec<String> = col.data.iter().map(row_num_to_name).collect();
-            trace!("col: -> {} ({})", row_names.join(", "), row_names.len());
-        }
-    }
+fn add_node(nodes: &mut Vec<Node>, col_names: &mut HashMap<Index, Index>, row: usize, col: usize) {
+    let new_i = nodes.len() as Index;
+    let column = (col + N_NODE_COUNT) as Index;
+    let col_start = *col_names.entry(column).or_insert(new_i);
+    let mut node = Node::new(new_i, column);
+    row_insert(nodes, &mut node, row);
+    col_insert(nodes, &mut node, col_start);
+    nodes.push(node);
+    trace!("  add node {}", col_num_to_name(col));
+}
 
-    fn next_move(&self) -> SearchResult {
-        if let Some(col) = self.columns.iter().min_by_key(|col| col.len) {
-            let mut iter = col.data.iter();
-            if let Some(row) = iter.next() {
-                if iter.next().is_none() {
-                    // only choice for this row
-                    return SearchResult::Selected(row);
-                } else {
-                    return SearchResult::Possibility(Trace {
-                        pre_view: self.clone(),
-                        row: row,
-                    });
-                }
-            } else {
-                return SearchResult::Invalid;
-            }
-        } else {
-            return SearchResult::Finished;
-        }
-    }
+fn col_numbers(i: usize, j: usize, z: usize) -> [usize; 4] {
+    // row / col constraint
+    // row-number constraint
+    // col-number constraint
+    // box-number constraint
+    [
+        i * N + j,
+        (N + i) * N + z,
+        (2 * N + j) * N + z,
+        (3 * N + j / 3 * 3 + i / 3) * N + z,
+    ]
 }
 
 impl From<&Board> for Table {
     fn from(board: &Board) -> Self {
-        let mut columns = Vec::with_capacity(N * N * 4);
+        // cell index buildup:
+        // for each row:
+        // [row / col, row-number, col-number, box-number]
+        let mut col_names = HashMap::new();
+        let mut nodes = Vec::with_capacity(N_GRID_COUNT);
 
-        // row / col constraint
         for i in 0..N {
             for j in 0..N {
-                // row i, col j
-                let col = (0..N).map(|v| (i * N + j) * N + v).rev().collect();
-                columns.push(Column { data: col, len: 9 });
-            }
-        }
+                for z in 0..N {
+                    trace!("R{}C{}#{}", i + 1, j + 1, z + 1);
+                    let row_num = (i * N + j) * N + z;
+                    let row = row_num * 4;
+                    debug_assert_eq!(row, nodes.len());
 
-        // row-number constraint
-        for i in 0..N {
-            for j in 0..N {
-                // row i, number j
-                let col = (0..N).map(|v| (i * N + v) * N + j).rev().collect();
-                columns.push(Column { data: col, len: 9 });
-            }
-        }
-
-        // col-number constraint
-        for i in 0..N {
-            for j in 0..N {
-                // col i, number j
-                let col = (0..N).map(|v| (v * N + i) * N + j).rev().collect();
-                columns.push(Column { data: col, len: 9 });
-            }
-        }
-
-        // box-number constraint
-        for b_i in 0..3 {
-            for b_j in 0..3 {
-                for j in 0..N {
-                    // block b_i/b_j, number j
-                    let col = (0..3)
-                        .flat_map(|x| {
-                            (0..3).map(move |y| ((b_i * 3 + x) * N + b_j * 3 + y) * N + j)
-                        })
-                        .rev()
-                        .collect();
-                    columns.push(Column { data: col, len: 9 });
+                    let columns = col_numbers(i, j, z);
+                    for col in columns.into_iter() {
+                        add_node(&mut nodes, &mut col_names, row, col);
+                    }
                 }
             }
         }
 
-        let selected = select_rows(&mut columns, board);
-        let view = View { columns, selected };
-        let traces = vec![];
-        return Self {
-            view,
-            traces,
-            selected: false,
+        debug_assert_eq!(nodes.len(), N_NODE_COUNT);
+
+        // add column headers
+        debug_assert_eq!(col_names.len(), N_NODE_COLS);
+        trace!("adding column headers");
+        for col in 0..N_NODE_COLS {
+            add_node(&mut nodes, &mut col_names, N_NODE_COUNT, col);
+        }
+
+        trace!("adding root");
+        add_node(&mut nodes, &mut col_names, N_NODE_COUNT, N_NODE_COLS);
+
+        debug_assert_eq!(N_GRID_COUNT, nodes.len());
+
+        let mut view = View {
+            nodes,
+            sizes: [N as ColSize; N_NODE_COLS],
         };
+
+        let given = view.select_rows(board);
+        Self {
+            view,
+            given,
+            selected: vec![],
+            search_state: SearchState::Begin,
+        }
     }
 }
 
 impl Table {
-    fn backtrack(&mut self) -> bool {
-        return match self.traces.pop() {
-            Some(trace) => {
-                self.view = trace.pre_view;
-                for col in self.view.columns.iter_mut() {
-                    if col.data.remove(trace.row) {
-                        col.len -= 1;
+    fn choose_column(&self, h_i: Index, mut j: Index) -> Index {
+        debug_assert_ne!(h_i, j);
+        let mut s = (N + 1) as ColSize;
+        let mut c = j;
+        while s > 0 && j != h_i {
+            let j_size = self.view.sizes[j as usize - N_NODE_COUNT];
+            debug_assert!(check_col_count(&self.view.nodes, j_size + 1, j));
+            if j_size < s {
+                c = j;
+                s = j_size;
+            }
+            j = self.view.nodes[j as usize].right;
+        }
+        debug!(
+            "chosen c: {:5} (s: {} = {:?})",
+            self.view.col_name(c as usize),
+            s,
+            self.view.row_names(c)
+        );
+        c
+    }
+
+    fn search(&mut self) {
+        // advance search state
+        self.search_state = match self.search_state {
+            SearchState::Begin => {
+                debug!("search({})", self.selected.len());
+                let h_i = N_GRID_COUNT - 1;
+                let h_right = self.view.nodes[h_i].right;
+                if h_i == (h_right as usize) {
+                    SearchState::SolutionFound
+                } else {
+                    // Choose column object (lowest score)
+                    let c = self.choose_column(h_i as Index, h_right);
+                    let r = self.view.nodes[c as usize].down;
+                    if r == c {
+                        // invalid solution (0 entries in column)
+                        SearchState::Uncover
+                    } else {
+                        self.view.cover_column(c);
+                        self.selected.push(r);
+                        SearchState::Cover
                     }
                 }
-                debug!(
-                    "Backtracked   {} [c={}]",
-                    row_num_to_name(trace.row),
-                    self.traces.len()
-                );
-                true
             }
-            None => false,
+            SearchState::SolutionFound => SearchState::Uncover,
+            SearchState::Cover => {
+                let r = *self.selected.last().unwrap();
+                debug!(" select {}", row_num_to_name((r / 4) as usize));
+                let mut j = self.view.nodes[r as usize].right;
+                while j != r {
+                    let (next, column) = {
+                        let n = &self.view.nodes[j as usize];
+                        (n.right, n.column)
+                    };
+                    self.view.cover_column(column);
+                    j = next;
+                }
+                SearchState::Begin
+            }
+            SearchState::Uncover => {
+                if let Some(r) = self.selected.pop() {
+                    let (mut j, r_down, c) = {
+                        let n = &self.view.nodes[r as usize];
+                        (n.left, n.down, n.column)
+                    };
+                    while j != r {
+                        let (next, column) = {
+                            let n = &self.view.nodes[j as usize];
+                            (n.left, n.column)
+                        };
+                        self.view.uncover_column(column);
+                        j = next;
+                    }
+                    if r_down == c {
+                        self.view.uncover_column(c);
+                        SearchState::Uncover
+                    } else {
+                        self.selected.push(r_down);
+                        SearchState::Cover
+                    }
+                } else {
+                    SearchState::Finished
+                }
+            }
+            SearchState::Finished => SearchState::Finished,
         };
+    }
+}
+
+impl View {
+    fn select_rows(&mut self, board: &Board) -> Vec<Index> {
+        let mut rows = vec![];
+        for (i, row) in board.cells.iter().enumerate() {
+            for (j, &cell) in row.iter().enumerate() {
+                if cell < 1 {
+                    continue;
+                }
+
+                trace!("cover row R{}C{}#{}", i + 1, j + 1, cell);
+                rows.push(4 * (((i * N + j) * N) as Index + cell as Index - 1));
+
+                let columns = col_numbers(i, j, (cell - 1) as usize);
+                for col in columns.into_iter() {
+                    if self.nodes[self.nodes[col + N_NODE_COUNT].left as usize].right as usize
+                        != col + N_NODE_COUNT
+                    {
+                        warn!(
+                            "invalid puzzle: {} is repeatedly covered",
+                            self.col_name(col + N_NODE_COUNT)
+                        );
+                    } else {
+                        self.cover_column((col + N_NODE_COUNT) as Index);
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    fn col_name(&self, i: usize) -> String {
+        debug_assert!(i >= N_NODE_COUNT);
+        col_num_to_name(i - N_NODE_COUNT)
+    }
+
+    fn row_names(&self, c: Index) -> Vec<String> {
+        let mut res = vec![];
+        let mut next = self.nodes[c as usize].down;
+        while next != c {
+            res.push(row_num_to_name(next as usize / 4));
+            next = self.nodes[next as usize].down;
+        }
+        res
+    }
+
+    fn cover_column(&mut self, column: Index) {
+        trace!(
+            "  cover col {} (s: {})",
+            self.col_name(column as usize),
+            self.sizes[column as usize - N_NODE_COUNT]
+        );
+        debug_assert!(check_col_count(
+            &self.nodes,
+            self.sizes[column as usize - N_NODE_COUNT] + 1,
+            column
+        ));
+        let (c_right, c_left, mut i) = {
+            let c = &self.nodes[column as usize];
+            (c.right, c.left, c.down)
+        };
+        self.nodes[c_right as usize].left = c_left;
+        self.nodes[c_left as usize].right = c_right;
+        while i != column {
+            let (mut j, i_down) = {
+                let n = &self.nodes[i as usize];
+                (n.right, n.down)
+            };
+            while j != i {
+                let (j_right, j_up, j_down, j_c) = {
+                    let n = &self.nodes[j as usize];
+                    (n.right, n.up, n.down, n.column)
+                };
+                self.nodes[j_down as usize].up = j_up;
+                self.nodes[j_up as usize].down = j_down;
+                self.sizes[j_c as usize - N_NODE_COUNT] -= 1;
+                j = j_right;
+            }
+
+            i = i_down;
+        }
+    }
+
+    fn uncover_column(&mut self, column: Index) {
+        trace!("  uncover col {}", self.col_name(column as usize));
+        let (c_right, c_left, mut i) = {
+            let c = &self.nodes[column as usize];
+            (c.right, c.left, c.up)
+        };
+        while i != column {
+            let (mut j, i_up) = {
+                let n = &self.nodes[i as usize];
+                (n.left, n.up)
+            };
+            while j != i {
+                let (j_left, j_up, j_down, j_c) = {
+                    let n = &self.nodes[j as usize];
+                    (n.left, n.up, n.down, n.column)
+                };
+                self.nodes[j_down as usize].up = j;
+                self.nodes[j_up as usize].down = j;
+                self.sizes[j_c as usize - N_NODE_COUNT] += 1;
+                j = j_left;
+            }
+
+            i = i_up;
+        }
+        self.nodes[c_right as usize].left = column;
+        self.nodes[c_left as usize].right = column;
     }
 }
 
@@ -333,33 +504,14 @@ impl Iterator for Table {
     type Item = Board;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.selected && !self.backtrack() {
-            return None;
-        }
-
         loop {
-            match self.view.next_move() {
-                SearchResult::Invalid => {
-                    if !self.backtrack() {
-                        return None;
-                    }
+            match self.search_state {
+                SearchState::SolutionFound => {
+                    self.search();
+                    return Some(Board::from(&*self));
                 }
-                SearchResult::Finished => {
-                    self.selected = true;
-                    return Some((&self.view).into());
-                }
-                SearchResult::Selected(row) => {
-                    self.view.select_row(row);
-                }
-                SearchResult::Possibility(trace) => {
-                    debug!(
-                        "Branched into {} [c={}]",
-                        row_num_to_name(trace.row),
-                        self.traces.len()
-                    );
-                    self.view.select_row(trace.row);
-                    self.traces.push(trace);
-                }
+                SearchState::Finished => return None,
+                _ => self.search(),
             }
         }
     }
@@ -368,14 +520,12 @@ impl Iterator for Table {
 fn main() {
     pretty_env_logger::init();
     let board = read_board().unwrap();
-    debug!("solving:\n{:b}", board);
+    debug!("solving:\n{}", board);
 
     let mut table = Table::from(&board);
 
-    let n_board = Board::from(&table.view);
-    assert_eq!(board, n_board);
-
-    table.view.log_col_counts();
+    // ensure that we can reconstruct the board from the table:
+    debug_assert_eq!(board, Board::from(&table));
 
     if log_enabled!(Level::Info) {
         for (i, solution) in table.enumerate() {

@@ -1,13 +1,10 @@
 [package]
 name = "sudoku"
 version = "0.1.0"
-authors = ["Martin Dreher <martin@thinkpad>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-log = ""
-pretty_env_logger = ""
-bit-set = ""
-# hibitset = "0.6"
+log = "0.4.17"
+pretty_env_logger = "0.4.0"
