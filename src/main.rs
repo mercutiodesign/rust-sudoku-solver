@@ -1,7 +1,5 @@
-#[macro_use]
-extern crate log;
 use bit_set::BitSet;
-use log::{debug, error, info, trace, Level};
+use log::{debug, error, info, log_enabled, trace, Level};
 use std::fmt;
 use std::io::{self, BufRead};
 
