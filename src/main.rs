@@ -312,7 +312,7 @@ impl Table {
             }
             j = self.view.nodes[j as usize].right;
         }
-        debug!(
+        trace!(
             "chosen c: {:5} (s: {} = {:?})",
             self.view.col_name(c as usize),
             s,
@@ -325,7 +325,7 @@ impl Table {
         // advance search state
         self.search_state = match self.search_state {
             SearchState::Begin => {
-                debug!("search({})", self.selected.len());
+                trace!("search({})", self.selected.len());
                 let h_i = N_GRID_COUNT - 1;
                 let h_right = self.view.nodes[h_i].right;
                 if h_i == (h_right as usize) {
@@ -347,7 +347,7 @@ impl Table {
             SearchState::SolutionFound => SearchState::Uncover,
             SearchState::Cover => {
                 let r = *self.selected.last().unwrap();
-                debug!(" select {}", row_num_to_name((r / 4) as usize));
+                trace!(" select {}", row_num_to_name((r / 4) as usize));
                 let mut j = self.view.nodes[r as usize].right;
                 while j != r {
                     let (next, column) = {
@@ -520,7 +520,7 @@ impl Iterator for Table {
 fn main() {
     pretty_env_logger::init();
     let board = read_board().unwrap();
-    debug!("solving:\n{}", board);
+    debug!("solving:\n{:b}", board);
 
     let mut table = Table::from(&board);
 
