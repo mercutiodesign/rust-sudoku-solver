@@ -68,7 +68,6 @@ fn row_num_to_coords(i: usize) -> (usize, usize, u8) {
     (x, y, z as u8 + 1)
 }
 
-#[allow(dead_code)]
 fn row_num_to_name(i: usize) -> String {
     let (x, y, z) = row_num_to_coords(i);
     format!("R{}C{}#{}", x + 1, y + 1, z)
