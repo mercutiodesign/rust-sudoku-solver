@@ -11,7 +11,7 @@ const N_NODE_COLS: usize = 4 * N_COLS * N_ROWS;
 const N_NODE_COUNT: usize = N * N_NODE_COLS;
 const N_GRID_COUNT: usize = (N + 1) * N_NODE_COLS + 1;
 
-// index must be big enough to handle values up to 4 * N^3 (= N_NODE_COUNT)
+// index must be big enough to handle values up to N_GRID_COUNT
 type Index = u16;
 type ColSize = u8;
 
@@ -36,8 +36,6 @@ struct View {
 enum SearchState {
     Begin,
     SolutionFound,
-    Cover,
-    Uncover,
     Finished,
 }
 
@@ -323,68 +321,71 @@ impl Table {
     fn search(&mut self) {
         // advance search state
         self.search_state = match self.search_state {
-            SearchState::Begin => {
-                trace!("search({})", self.selected.len());
-                let h_i = N_GRID_COUNT - 1;
-                let h_right = self.view.nodes[h_i].right;
-                if h_i == (h_right as usize) {
-                    SearchState::SolutionFound
-                } else {
-                    // Choose column object (lowest score)
-                    let c = self.choose_column(h_i as Index, h_right);
-                    let r = self.view.nodes[c as usize].down;
-                    if r == c {
-                        // invalid solution (0 entries in column)
-                        SearchState::Uncover
-                    } else {
-                        self.view.cover_column(c);
-                        self.selected.push(r);
-                        SearchState::Cover
-                    }
-                }
-            }
-            SearchState::SolutionFound => SearchState::Uncover,
-            SearchState::Cover => {
-                let r = *self.selected.last().unwrap();
-                trace!(" select {}", row_num_to_name((r / 4) as usize));
-                let mut j = self.view.nodes[r as usize].right;
-                while j != r {
-                    let (next, column) = {
-                        let n = &self.view.nodes[j as usize];
-                        (n.right, n.column)
-                    };
-                    self.view.cover_column(column);
-                    j = next;
-                }
-                SearchState::Begin
-            }
-            SearchState::Uncover => {
-                if let Some(r) = self.selected.pop() {
-                    let (mut j, r_down, c) = {
-                        let n = &self.view.nodes[r as usize];
-                        (n.left, n.down, n.column)
-                    };
-                    while j != r {
-                        let (next, column) = {
-                            let n = &self.view.nodes[j as usize];
-                            (n.left, n.column)
-                        };
-                        self.view.uncover_column(column);
-                        j = next;
-                    }
-                    if r_down == c {
-                        self.view.uncover_column(c);
-                        SearchState::Uncover
-                    } else {
-                        self.selected.push(r_down);
-                        SearchState::Cover
-                    }
-                } else {
-                    SearchState::Finished
-                }
-            }
+            SearchState::Begin => self.begin(),
+            SearchState::SolutionFound => self.uncover(),
             SearchState::Finished => SearchState::Finished,
         };
+    }
+
+    fn uncover(&mut self) -> SearchState {
+        if let Some(r) = self.selected.pop() {
+            let (mut j, r_down, c) = {
+                let n = &self.view.nodes[r as usize];
+                (n.left, n.down, n.column)
+            };
+            while j != r {
+                let (next, column) = {
+                    let n = &self.view.nodes[j as usize];
+                    (n.left, n.column)
+                };
+                self.view.uncover_column(column);
+                j = next;
+            }
+            if r_down == c {
+                self.view.uncover_column(c);
+                self.uncover()
+            } else {
+                self.selected.push(r_down);
+                self.cover(r_down)
+            }
+        } else {
+            SearchState::Finished
+        }
+    }
+
+    fn cover(&mut self, r: Index) -> SearchState {
+        trace!(" select {}", row_num_to_name((r / 4) as usize));
+        let mut j = self.view.nodes[r as usize].right;
+        while j != r {
+            let (next, column) = {
+                let n = &self.view.nodes[j as usize];
+                (n.right, n.column)
+            };
+            self.view.cover_column(column);
+            j = next;
+        }
+        self.begin()
+    }
+
+    fn begin(&mut self) -> SearchState {
+        trace!("search({})", self.selected.len());
+        let h_i = N_GRID_COUNT - 1;
+        let h_right = self.view.nodes[h_i].right;
+        if h_i == (h_right as usize) {
+            SearchState::SolutionFound
+        } else {
+            // Choose column object (lowest score)
+            let c = self.choose_column(h_i as Index, h_right);
+            let r = self.view.nodes[c as usize].down;
+            if r == c {
+                // invalid solution (0 entries in column)
+                self.uncover()
+            } else {
+                self.view.cover_column(c);
+                self.selected.push(r);
+                self.cover(r)
+            }
+        }
     }
 }
 
@@ -503,15 +504,10 @@ impl Iterator for Table {
     type Item = Board;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.search_state {
-                SearchState::SolutionFound => {
-                    self.search();
-                    return Some(Board::from(&*self));
-                }
-                SearchState::Finished => return None,
-                _ => self.search(),
-            }
+        self.search();
+        match self.search_state {
+            SearchState::SolutionFound => Some(Board::from(&*self)),
+            _ => None,
         }
     }
 }
