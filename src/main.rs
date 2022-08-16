@@ -15,7 +15,6 @@ const N_GRID_COUNT: usize = (N + 1) * N_NODE_COLS + 1;
 type Index = u16;
 type ColSize = u8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Board {
     cells: [[u8; N_COLS]; N_ROWS],
 }
@@ -520,7 +519,7 @@ fn main() {
     let mut table = Table::from(&board);
 
     // ensure that we can reconstruct the board from the table:
-    debug_assert_eq!(board, Board::from(&table));
+    debug_assert_eq!(board.cells, Board::from(&table).cells);
 
     if log_enabled!(Level::Info) {
         for (i, solution) in table.enumerate() {
