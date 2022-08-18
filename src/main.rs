@@ -13,7 +13,6 @@ const N_GRID_COUNT: usize = (N + 1) * N_NODE_COLS + 1;
 
 // index must be big enough to handle values up to N_GRID_COUNT
 type Index = u16;
-type ColSize = u8;
 
 struct Board {
     cells: [[u8; N_COLS]; N_ROWS],
@@ -29,7 +28,6 @@ struct Node {
 
 struct View {
     nodes: Vec<Node>,
-    sizes: [ColSize; N_NODE_COLS],
 }
 
 enum SearchState {
@@ -202,25 +200,16 @@ fn col_insert(nodes: &mut Vec<Node>, node: &mut Node, col: Index) {
     }
 }
 
-fn check_col_count(nodes: &Vec<Node>, size: ColSize, col_start: Index) -> bool {
-    let mut next = col_start;
-    let mut count = 0;
-    loop {
-        debug_assert_eq!(nodes[next as usize].column, col_start);
-        next = nodes[next as usize].down;
-        count += 1;
-        if next == col_start {
-            break;
-        }
-    }
-    debug_assert_eq!(count, size);
-    count == size
-}
-
 fn add_node(nodes: &mut Vec<Node>, col_names: &mut HashMap<Index, Index>, row: usize, col: usize) {
     let new_i = nodes.len() as Index;
-    let column = (col + N_NODE_COUNT) as Index;
-    let col_start = *col_names.entry(column).or_insert(new_i);
+    let col_key = (col + N_NODE_COUNT) as Index;
+    let col_start = *col_names.entry(col_key).or_insert(new_i);
+    // store size in "column" header
+    let column = if col_key == new_i {
+        N as Index
+    } else {
+        col_key
+    };
     let mut node = Node::new(new_i, column);
     row_insert(nodes, &mut node, row);
     col_insert(nodes, &mut node, col_start);
@@ -279,10 +268,7 @@ impl From<&Board> for Table {
 
         debug_assert_eq!(N_GRID_COUNT, nodes.len());
 
-        let mut view = View {
-            nodes,
-            sizes: [N as ColSize; N_NODE_COLS],
-        };
+        let mut view = View { nodes };
 
         let given = view.select_rows(board);
         Self {
@@ -295,18 +281,51 @@ impl From<&Board> for Table {
 }
 
 impl Table {
+    fn search(&mut self) {
+        // advance search state
+        self.search_state = match self.search_state {
+            SearchState::Begin => self.begin(),
+            SearchState::SolutionFound => self.uncover(),
+            SearchState::Finished => SearchState::Finished,
+        };
+    }
+
+    fn begin(&mut self) -> SearchState {
+        trace!("search({})", self.selected.len());
+        let h_i = N_GRID_COUNT - 1;
+        let h_right = self.view.nodes[h_i].right;
+        if h_i == (h_right as usize) {
+            SearchState::SolutionFound
+        } else {
+            // Choose column object (lowest score)
+            let c = self.choose_column(h_i as Index, h_right);
+            let r = self.view.nodes[c as usize].down;
+            if r == c {
+                // invalid solution (0 entries in column)
+                self.uncover()
+            } else {
+                self.view.cover_column(c);
+                self.selected.push(r);
+                self.cover(r)
+            }
+        }
+    }
+
     fn choose_column(&self, h_i: Index, mut j: Index) -> Index {
         debug_assert_ne!(h_i, j);
-        let mut s = (N + 1) as ColSize;
+        let mut s = (N + 1) as Index;
         let mut c = j;
         while s > 0 && j != h_i {
-            let j_size = self.view.sizes[j as usize - N_NODE_COUNT];
-            debug_assert!(check_col_count(&self.view.nodes, j_size + 1, j));
+            let (j_size, next) = {
+                let n = &self.view.nodes[j as usize];
+                (n.column, n.right)
+            };
+            debug_assert!(self.view.check_col_count(j));
             if j_size < s {
                 c = j;
                 s = j_size;
             }
-            j = self.view.nodes[j as usize].right;
+            j = next;
         }
         trace!(
             "chosen c: {:5} (s: {} = {:?})",
@@ -317,13 +336,18 @@ impl Table {
         c
     }
 
-    fn search(&mut self) {
-        // advance search state
-        self.search_state = match self.search_state {
-            SearchState::Begin => self.begin(),
-            SearchState::SolutionFound => self.uncover(),
-            SearchState::Finished => SearchState::Finished,
-        };
+    fn cover(&mut self, r: Index) -> SearchState {
+        trace!(" select {}", row_num_to_name((r / 4) as usize));
+        let mut j = self.view.nodes[r as usize].right;
+        while j != r {
+            let (next, column) = {
+                let n = &self.view.nodes[j as usize];
+                (n.right, n.column)
+            };
+            self.view.cover_column(column);
+            j = next;
+        }
+        self.begin()
     }
 
     fn uncover(&mut self) -> SearchState {
@@ -349,41 +373,6 @@ impl Table {
             }
         } else {
             SearchState::Finished
-        }
-    }
-
-    fn cover(&mut self, r: Index) -> SearchState {
-        trace!(" select {}", row_num_to_name((r / 4) as usize));
-        let mut j = self.view.nodes[r as usize].right;
-        while j != r {
-            let (next, column) = {
-                let n = &self.view.nodes[j as usize];
-                (n.right, n.column)
-            };
-            self.view.cover_column(column);
-            j = next;
-        }
-        self.begin()
-    }
-
-    fn begin(&mut self) -> SearchState {
-        trace!("search({})", self.selected.len());
-        let h_i = N_GRID_COUNT - 1;
-        let h_right = self.view.nodes[h_i].right;
-        if h_i == (h_right as usize) {
-            SearchState::SolutionFound
-        } else {
-            // Choose column object (lowest score)
-            let c = self.choose_column(h_i as Index, h_right);
-            let r = self.view.nodes[c as usize].down;
-            if r == c {
-                // invalid solution (0 entries in column)
-                self.uncover()
-            } else {
-                self.view.cover_column(c);
-                self.selected.push(r);
-                self.cover(r)
-            }
         }
     }
 }
@@ -437,13 +426,9 @@ impl View {
         trace!(
             "  cover col {} (s: {})",
             self.col_name(column as usize),
-            self.sizes[column as usize - N_NODE_COUNT]
+            self.nodes[column as usize].column
         );
-        debug_assert!(check_col_count(
-            &self.nodes,
-            self.sizes[column as usize - N_NODE_COUNT] + 1,
-            column
-        ));
+        debug_assert!(self.check_col_count(column));
         let (c_right, c_left, mut i) = {
             let c = &self.nodes[column as usize];
             (c.right, c.left, c.down)
@@ -462,7 +447,7 @@ impl View {
                 };
                 self.nodes[j_down as usize].up = j_up;
                 self.nodes[j_up as usize].down = j_down;
-                self.sizes[j_c as usize - N_NODE_COUNT] -= 1;
+                self.nodes[j_c as usize].column -= 1;
                 j = j_right;
             }
 
@@ -488,7 +473,7 @@ impl View {
                 };
                 self.nodes[j_down as usize].up = j;
                 self.nodes[j_up as usize].down = j;
-                self.sizes[j_c as usize - N_NODE_COUNT] += 1;
+                self.nodes[j_c as usize].column += 1;
                 j = j_left;
             }
 
@@ -496,6 +481,21 @@ impl View {
         }
         self.nodes[c_right as usize].left = column;
         self.nodes[c_left as usize].right = column;
+    }
+
+    fn check_col_count(&self, col_start: Index) -> bool {
+        let (mut next, size) = {
+            let n = &self.nodes[col_start as usize];
+            (n.down, n.column)
+        };
+        let mut count = 0;
+        while next != col_start {
+            debug_assert_eq!(self.nodes[next as usize].column, col_start);
+            count += 1;
+            next = self.nodes[next as usize].down;
+        }
+        debug_assert_eq!(count, size);
+        count == size
     }
 }
 
